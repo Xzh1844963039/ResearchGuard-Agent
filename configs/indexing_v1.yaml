@@ -1,0 +1,37 @@
+corpus:
+  input_root: "C:\\Users\\18449\\Desktop\\researchguard_workspace\\data\\parsed\\chunk_eval_v1"
+  papers:
+    - paper_rag
+    - paper_agent
+    - paper_hallucination
+    - paper_corrective_rag
+    - paper_citation
+  chunk_filename: "chunks.jsonl"
+
+embedding:
+  provider: "openai"
+  model: "text-embedding-3-small"
+  dimensions: 1536
+  batch_size: 64
+  max_retries: 4
+  timeout: 60
+  normalize: true
+  cache_enabled: true
+
+dense_index:
+  backend: "numpy"
+  metric: "cosine"
+  output_dir: "C:\\Users\\18449\\Desktop\\researchguard_workspace\\data\\indexes\\index_v1\\dense"
+
+sparse_index:
+  enabled: true
+  backend: "local_bm25"
+  output_dir: "C:\\Users\\18449\\Desktop\\researchguard_workspace\\data\\indexes\\index_v1\\sparse"
+
+build:
+  output_dir: "C:\\Users\\18449\\Desktop\\researchguard_workspace\\data\\indexes\\index_v1"
+  incremental: true
+  force_rebuild: false
+  validate_before_build: true
+  fail_on_duplicate_chunk_id: true
+  fail_on_invalid_metadata: true

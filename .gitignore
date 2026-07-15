@@ -1,0 +1,51 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python caches
+__pycache__/
+**/__pycache__/
+**pycache**/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+
+# IDE and editor state
+.idea/
+.vscode/
+*.iml
+
+# Research data and generated outputs
+data/raw_docs/
+data/parsed/
+data/indexes/
+outputs/
+
+# Large or generated artifacts
+*.pdf
+*.zip
+*.7z
+*.tar
+*.gz
+*.npy
+*.npz
+*.pkl
+*.pickle
+*.index
+*.faiss
+
+# Runtime caches and logs
+embedding_cache/
+cache/
+tmp/
+temp/
+logs/
+*.log
