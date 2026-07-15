@@ -1,0 +1,25 @@
+index:
+  output_dir: "C:\\Users\\18449\\Desktop\\researchguard_workspace\\data\\indexes\\index_v1"
+  indexing_config_path: "C:\\Users\\18449\\Desktop\\researchguard_workspace\\configs\\indexing_v1.yaml"
+
+retrieval:
+  default_mode: "hybrid"
+  default_top_k: 10
+  default_candidate_k: 80
+  max_top_k: 50
+  deterministic_tiebreak: "chunk_id"
+
+hybrid:
+  fusion: "rrf"
+  rrf_k: 60
+  dense_weight: 1.0
+  sparse_weight: 1.0
+
+filters:
+  exclude_references_by_default: false
+
+validation:
+  benchmark_path: "C:\\Users\\18449\\Desktop\\researchguard_workspace\\data\\eval\\retrieval_v1_queries.jsonl"
+  output_dir: "C:\\Users\\18449\\Desktop\\researchguard_workspace\\outputs\\retrieval_validation_v1"
+  top_k_values: [1, 3, 5, 10]
+  candidate_k: 80
