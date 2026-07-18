@@ -31,6 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mode", choices=["dense", "sparse", "hybrid"], default=None)
     parser.add_argument("--top-k", type=int, default=None)
     parser.add_argument("--candidate-k", type=int, default=None)
+    parser.add_argument("--dense-backend", choices=["numpy", "chroma"], default=None)
     parser.add_argument("--doc-id", action="append", default=[], help="Repeatable or comma-separated doc_id filter.")
     parser.add_argument("--section", action="append", default=[], help="Repeatable or comma-separated section filter.")
     parser.add_argument("--chunk-type", action="append", default=[], help="Repeatable or comma-separated chunk_type filter.")
@@ -54,7 +55,7 @@ def main() -> int:
         has_table=True if args.has_table else None,
         has_caption=True if args.has_caption else None,
     )
-    engine = RetrievalEngine.from_config(args.config)
+    engine = RetrievalEngine.from_config(args.config, dense_backend_override=args.dense_backend)
     response = engine.retrieve(
         args.query,
         mode=args.mode,

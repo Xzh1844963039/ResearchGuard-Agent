@@ -1,0 +1,30 @@
+chroma:
+  persist_directory: "data/indexes/chroma_v1"
+  collection_name: "researchguard_papers_v1"
+  distance_metric: "cosine"
+  batch_size: 100
+  allow_reset: false
+
+source:
+  index_directory: "data/indexes/index_v1"
+  corpus_manifest: "corpus_manifest.jsonl"
+  vectors_file: "dense/vectors.npy"
+  ids_file: "dense/ids.json"
+  dense_manifest: "dense/dense_manifest.json"
+  index_manifest: "index_manifest.json"
+
+sync:
+  mode: "incremental"
+  upsert_changed: true
+  delete_stale: true
+  fail_on_fingerprint_mismatch: true
+  large_delete_ratio: 0.10
+
+validation:
+  benchmark_path: "data/eval/retrieval_v1_queries.jsonl"
+  output_directory: "outputs/chroma_validation_v1"
+  comparison_queries: 30
+  top_k_values: [1, 3, 5, 10]
+  minimum_top10_overlap: 0.95
+  embedding_sample_size: 40
+  metadata_sample_size: 337

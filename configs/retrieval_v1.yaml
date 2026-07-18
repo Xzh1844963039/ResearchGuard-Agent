@@ -9,6 +9,10 @@ retrieval:
   max_top_k: 50
   deterministic_tiebreak: "chunk_id"
 
+dense:
+  backend: "chroma"
+  chroma_config_path: "C:\\Users\\18449\\Desktop\\researchguard_workspace\\configs\\chroma_v1.yaml"
+
 hybrid:
   fusion: "rrf"
   rrf_k: 60

@@ -28,6 +28,8 @@ data/raw_docs/
 data/parsed/
 data/indexes/
 outputs/
+data/indexes/chroma_v1/
+outputs/chroma_validation_v1/
 
 # Large or generated artifacts
 *.pdf
@@ -41,6 +43,8 @@ outputs/
 *.pickle
 *.index
 *.faiss
+*.sqlite3
+chroma.sqlite3
 
 # Runtime caches and logs
 embedding_cache/

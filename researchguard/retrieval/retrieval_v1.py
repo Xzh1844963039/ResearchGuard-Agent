@@ -11,6 +11,8 @@ import numpy as np
 
 from researchguard.indexing.embedding_provider import OpenAIEmbeddingProvider, parse_embedding_config, validate_vector
 from researchguard.indexing.sparse_index import tokenize
+from researchguard.retrieval.chroma_retriever import ChromaDenseRetrieverBackend
+from researchguard.retrieval.dense_backend import DenseRetrieverBackend, NumpyDenseRetrieverBackend
 from researchguard.retrieval.filters import metadata_matches
 from researchguard.retrieval.index_loader import RetrievalIndexBundle, load_index_bundle
 from researchguard.retrieval.models import MetadataFilter, RetrievalError, RetrievalHit, RetrievalResponse
@@ -20,7 +22,7 @@ VALID_MODES = {"dense", "sparse", "hybrid"}
 
 
 class RetrievalEngine:
-    def __init__(self, bundle: RetrievalIndexBundle):
+    def __init__(self, bundle: RetrievalIndexBundle, *, dense_backend_override: str | None = None):
         self.bundle = bundle
         self.config = bundle.config
         embedding_config = parse_embedding_config(bundle.indexing_config)
@@ -30,10 +32,29 @@ class RetrievalEngine:
             )
         self.embedding_provider = OpenAIEmbeddingProvider(embedding_config)
         self._query_vector_cache: dict[str, np.ndarray] = {}
+        dense_cfg = self.config.get("dense", {}) or {}
+        backend_name = str(dense_backend_override or dense_cfg.get("backend", "numpy"))
+        if backend_name == "numpy":
+            self.dense_backend: DenseRetrieverBackend = NumpyDenseRetrieverBackend(bundle)
+        elif backend_name == "chroma":
+            chroma_config_path = dense_cfg.get("chroma_config_path", "configs/chroma_v1.yaml")
+            self.dense_backend = ChromaDenseRetrieverBackend(bundle, chroma_config_path=chroma_config_path)
+        else:
+            raise RetrievalError(f"Unsupported dense backend: {backend_name}")
+        self.dense_backend_name = backend_name
+        self._last_dense_trace: dict[str, Any] = {}
 
     @classmethod
-    def from_config(cls, config_path: str | Path) -> "RetrievalEngine":
-        return cls(load_index_bundle(Path(config_path), strict=True))
+    def from_config(
+        cls,
+        config_path: str | Path,
+        *,
+        dense_backend_override: str | None = None,
+    ) -> "RetrievalEngine":
+        return cls(
+            load_index_bundle(Path(config_path), strict=True),
+            dense_backend_override=dense_backend_override,
+        )
 
     def retrieve(
         self,
@@ -66,6 +87,7 @@ class RetrievalEngine:
             "corpus_fingerprint": self.bundle.manifest.get("corpus_fingerprint"),
             "mode": mode,
             "candidate_k": candidate_k,
+            "dense_backend": self.dense_backend_name,
         }
 
         if mode == "dense":
@@ -78,6 +100,8 @@ class RetrievalEngine:
         hits = [self._hit_from_candidate(rank, candidate) for rank, candidate in enumerate(ranked[:top_k], start=1)]
         latency_ms = (time.perf_counter() - started) * 1000.0
         trace["returned"] = len(hits)
+        if mode in {"dense", "hybrid"}:
+            trace["dense_backend_trace"] = self._last_dense_trace
         return RetrievalResponse(
             query=normalized_query,
             mode=mode,
@@ -100,28 +124,9 @@ class RetrievalEngine:
 
     def _dense_candidates(self, query: str, candidate_k: int, filters: MetadataFilter) -> list[dict[str, Any]]:
         query_vector = self._embed_query(query)
-        q_norm = float(np.linalg.norm(query_vector))
-        if q_norm == 0 or not math.isfinite(q_norm):
-            raise RetrievalError("Query embedding has invalid norm.")
-        scores = self.bundle.dense_index.vectors @ (query_vector / q_norm)
-        candidates: list[dict[str, Any]] = []
-        for index, score in enumerate(scores):
-            doc = self.bundle.documents[index]
-            if not metadata_matches(doc, filters):
-                continue
-            candidates.append(
-                {
-                    "chunk_id": str(doc["chunk_id"]),
-                    "document": doc,
-                    "dense_score": float(score),
-                    "dense_rank": None,
-                    "retrieval_sources": ["dense"],
-                }
-            )
-        candidates.sort(key=lambda item: (-float(item["dense_score"]), str(item["chunk_id"])))
-        for rank, item in enumerate(candidates, start=1):
-            item["dense_rank"] = rank
-        return candidates[:candidate_k]
+        candidates, trace = self.dense_backend.search(query_vector, candidate_k=candidate_k, filters=filters)
+        self._last_dense_trace = trace
+        return candidates
 
     def _sparse_candidates(self, query: str, candidate_k: int, filters: MetadataFilter) -> list[dict[str, Any]]:
         tokens = tokenize(query)
