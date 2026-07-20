@@ -16,6 +16,8 @@ from researchguard.retrieval.dense_backend import DenseRetrieverBackend, NumpyDe
 from researchguard.retrieval.filters import metadata_matches
 from researchguard.retrieval.index_loader import RetrievalIndexBundle, load_index_bundle
 from researchguard.retrieval.models import MetadataFilter, RetrievalError, RetrievalHit, RetrievalResponse
+from researchguard.retrieval.rerank_pipeline import RerankPipeline
+from researchguard.retrieval.reranker import load_reranker_settings
 
 
 VALID_MODES = {"dense", "sparse", "hybrid"}
@@ -43,6 +45,10 @@ class RetrievalEngine:
             raise RetrievalError(f"Unsupported dense backend: {backend_name}")
         self.dense_backend_name = backend_name
         self._last_dense_trace: dict[str, Any] = {}
+        reranker_cfg = self.config.get("reranker", {}) or {}
+        reranker_config_path = reranker_cfg.get("config_path", "configs/reranker_v1.yaml")
+        _, self.reranker_settings = load_reranker_settings(reranker_config_path)
+        self._rerank_pipeline: RerankPipeline | None = None
 
     @classmethod
     def from_config(
@@ -64,6 +70,9 @@ class RetrievalEngine:
         top_k: int | None = None,
         candidate_k: int | None = None,
         filters: MetadataFilter | None = None,
+        rerank: bool | None = None,
+        rerank_candidate_k: int | None = None,
+        rerank_read_cache: bool = True,
     ) -> RetrievalResponse:
         normalized_query = str(query or "").strip()
         if not normalized_query:
@@ -72,8 +81,22 @@ class RetrievalEngine:
         mode = str(mode or retrieval_cfg.get("default_mode", "hybrid"))
         if mode not in VALID_MODES:
             raise RetrievalError(f"Unsupported retrieval mode: {mode}")
-        top_k = int(top_k or retrieval_cfg.get("default_top_k", 10))
+        rerank_enabled = self.reranker_settings.enabled if rerank is None else bool(rerank)
+        if rerank_enabled and mode != "hybrid":
+            raise RetrievalError("Reranker v1 only supports hybrid retrieval candidates.")
+        top_k = int(
+            top_k
+            or (
+                self.reranker_settings.final_top_k
+                if rerank_enabled
+                else retrieval_cfg.get("default_top_k", 10)
+            )
+        )
         candidate_k = int(candidate_k or retrieval_cfg.get("default_candidate_k", max(top_k, 10)))
+        effective_rerank_candidate_k = int(rerank_candidate_k or self.reranker_settings.candidate_k)
+        if rerank_enabled:
+            effective_rerank_candidate_k = max(effective_rerank_candidate_k, top_k)
+            candidate_k = max(candidate_k, effective_rerank_candidate_k, top_k)
         max_top_k = int(retrieval_cfg.get("max_top_k", 50))
         if top_k <= 0 or top_k > max_top_k:
             raise RetrievalError(f"top_k must be between 1 and {max_top_k}.")
@@ -88,18 +111,46 @@ class RetrievalEngine:
             "mode": mode,
             "candidate_k": candidate_k,
             "dense_backend": self.dense_backend_name,
+            "rerank_enabled": rerank_enabled,
         }
 
+        retrieval_started = time.perf_counter()
         if mode == "dense":
             ranked = self._dense_candidates(normalized_query, candidate_k, filters)
         elif mode == "sparse":
             ranked = self._sparse_candidates(normalized_query, candidate_k, filters)
         else:
             ranked = self._hybrid_candidates(normalized_query, candidate_k, filters)
+        retrieval_latency_ms = (time.perf_counter() - retrieval_started) * 1000.0
+
+        rerank_latency_ms = 0.0
+        if rerank_enabled:
+            rerank_pool = ranked[:effective_rerank_candidate_k]
+            rerank_result = self._get_rerank_pipeline().rerank(
+                normalized_query,
+                rerank_pool,
+                top_k=top_k,
+                read_cache=rerank_read_cache,
+            )
+            ranked = rerank_result.candidates
+            rerank_latency_ms = rerank_result.latency_ms
+            trace["reranker"] = {
+                "backend": self._get_rerank_pipeline().backend.backend_name,
+                "model": self._get_rerank_pipeline().backend.model_name,
+                "candidate_k": effective_rerank_candidate_k,
+                "candidate_count": len(rerank_pool),
+                "candidate_chunk_ids": [str(item["chunk_id"]) for item in rerank_pool],
+                "cache_hits": rerank_result.cache_hits,
+                "cache_misses": rerank_result.cache_misses,
+                "inference_latency_ms": rerank_result.inference_latency_ms,
+            }
 
         hits = [self._hit_from_candidate(rank, candidate) for rank, candidate in enumerate(ranked[:top_k], start=1)]
-        latency_ms = (time.perf_counter() - started) * 1000.0
+        total_latency_ms = (time.perf_counter() - started) * 1000.0
         trace["returned"] = len(hits)
+        trace["retrieval_latency_ms"] = retrieval_latency_ms
+        trace["rerank_latency_ms"] = rerank_latency_ms
+        trace["total_latency_ms"] = total_latency_ms
         if mode in {"dense", "hybrid"}:
             trace["dense_backend_trace"] = self._last_dense_trace
         return RetrievalResponse(
@@ -109,9 +160,17 @@ class RetrievalEngine:
             candidate_k=candidate_k,
             filters=filters,
             hits=hits,
-            latency_ms=latency_ms,
+            latency_ms=total_latency_ms,
             trace=trace,
+            retrieval_latency_ms=retrieval_latency_ms,
+            rerank_latency_ms=rerank_latency_ms,
+            total_latency_ms=total_latency_ms,
         )
+
+    def _get_rerank_pipeline(self) -> RerankPipeline:
+        if self._rerank_pipeline is None:
+            self._rerank_pipeline = RerankPipeline(self.reranker_settings)
+        return self._rerank_pipeline
 
     def _embed_query(self, query: str) -> np.ndarray:
         if query in self._query_vector_cache:
@@ -212,6 +271,8 @@ class RetrievalEngine:
 
         candidates = list(merged.values())
         candidates.sort(key=lambda item: (-float(item.get("fusion_score") or 0.0), str(item["chunk_id"])))
+        for fusion_rank, item in enumerate(candidates, start=1):
+            item["fusion_rank"] = fusion_rank
         return candidates[:candidate_k]
 
     def _hit_from_candidate(self, rank: int, candidate: dict[str, Any]) -> RetrievalHit:
@@ -239,5 +300,11 @@ class RetrievalEngine:
             fusion_score=candidate.get("fusion_score"),
             dense_rank=candidate.get("dense_rank"),
             sparse_rank=candidate.get("sparse_rank"),
+            fusion_rank=candidate.get("fusion_rank"),
+            rerank_score=candidate.get("rerank_score"),
+            rerank_rank=candidate.get("rerank_rank"),
+            pre_rerank_rank=candidate.get("pre_rerank_rank"),
+            reranker_backend=candidate.get("reranker_backend"),
+            reranker_model=candidate.get("reranker_model"),
             retrieval_sources=list(candidate.get("retrieval_sources", [])),
         )

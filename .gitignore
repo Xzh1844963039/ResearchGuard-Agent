@@ -49,6 +49,12 @@ chroma.sqlite3
 # Runtime caches and logs
 embedding_cache/
 cache/
+data/cache/reranker_v1/
+data/cache/reranker_models/
+.cache/huggingface/
+.cache/torch/
+*.safetensors
+pytorch_model*.bin
 tmp/
 temp/
 logs/

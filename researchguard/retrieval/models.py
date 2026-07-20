@@ -74,6 +74,12 @@ class RetrievalHit:
     fusion_score: float | None = None
     dense_rank: int | None = None
     sparse_rank: int | None = None
+    fusion_rank: int | None = None
+    rerank_score: float | None = None
+    rerank_rank: int | None = None
+    pre_rerank_rank: int | None = None
+    reranker_backend: str | None = None
+    reranker_model: str | None = None
     retrieval_sources: list[str] = field(default_factory=list)
 
     def to_dict(self, *, include_text: bool = True) -> dict[str, Any]:
@@ -99,6 +105,12 @@ class RetrievalHit:
             "fusion_score": self.fusion_score,
             "dense_rank": self.dense_rank,
             "sparse_rank": self.sparse_rank,
+            "fusion_rank": self.fusion_rank,
+            "rerank_score": self.rerank_score,
+            "rerank_rank": self.rerank_rank,
+            "pre_rerank_rank": self.pre_rerank_rank,
+            "reranker_backend": self.reranker_backend,
+            "reranker_model": self.reranker_model,
             "retrieval_sources": self.retrieval_sources,
         }
         if include_text:
@@ -116,6 +128,9 @@ class RetrievalResponse:
     hits: list[RetrievalHit]
     latency_ms: float
     trace: dict[str, Any]
+    retrieval_latency_ms: float | None = None
+    rerank_latency_ms: float = 0.0
+    total_latency_ms: float | None = None
 
     def to_dict(self, *, include_text: bool = True) -> dict[str, Any]:
         return {
@@ -125,6 +140,9 @@ class RetrievalResponse:
             "candidate_k": self.candidate_k,
             "filters": self.filters.to_dict(),
             "latency_ms": self.latency_ms,
+            "retrieval_latency_ms": self.retrieval_latency_ms if self.retrieval_latency_ms is not None else self.latency_ms,
+            "rerank_latency_ms": self.rerank_latency_ms,
+            "total_latency_ms": self.total_latency_ms if self.total_latency_ms is not None else self.latency_ms,
             "trace": self.trace,
             "hits": [hit.to_dict(include_text=include_text) for hit in self.hits],
         }

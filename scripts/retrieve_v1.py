@@ -32,6 +32,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--top-k", type=int, default=None)
     parser.add_argument("--candidate-k", type=int, default=None)
     parser.add_argument("--dense-backend", choices=["numpy", "chroma"], default=None)
+    rerank_group = parser.add_mutually_exclusive_group()
+    rerank_group.add_argument("--rerank", dest="rerank", action="store_true", help="Rerank hybrid candidates.")
+    rerank_group.add_argument("--no-rerank", dest="rerank", action="store_false", help="Disable reranking.")
+    parser.set_defaults(rerank=None)
+    parser.add_argument("--rerank-candidate-k", type=int, default=None)
     parser.add_argument("--doc-id", action="append", default=[], help="Repeatable or comma-separated doc_id filter.")
     parser.add_argument("--section", action="append", default=[], help="Repeatable or comma-separated section filter.")
     parser.add_argument("--chunk-type", action="append", default=[], help="Repeatable or comma-separated chunk_type filter.")
@@ -45,6 +50,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     args = build_parser().parse_args()
     filters = MetadataFilter(
         doc_ids=comma_values(args.doc_id),
@@ -62,6 +69,8 @@ def main() -> int:
         top_k=args.top_k,
         candidate_k=args.candidate_k,
         filters=filters,
+        rerank=args.rerank,
+        rerank_candidate_k=args.rerank_candidate_k,
     )
     payload: dict[str, Any] = response.to_dict(include_text=args.include_text)
     if not args.include_text:
