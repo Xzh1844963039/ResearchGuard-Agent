@@ -1,0 +1,24 @@
+query_rewrite:
+  enabled: false
+  backend: "openai"
+  model: "gpt-4.1-mini"
+  temperature: 0
+  max_rewrites: 3
+  timeout: 30
+  max_retries: 2
+  prompt_version: "query_rewrite_v1.2"
+  entity_rules_version: "entity_preservation_v1.3"
+  cache_enabled: true
+  cache_directory: "data/cache/query_rewrite_v1"
+
+multi_query:
+  rrf_k: 60
+
+validation:
+  benchmark_path: "data/eval/retrieval_v1_queries.jsonl"
+  retrieval_config_path: "configs/retrieval_v1.yaml"
+  output_directory: "outputs/query_rewrite_validation_v1"
+  retrieval_candidate_k: 80
+  rerank_candidate_k: 20
+  final_top_k: 10
+  top_k_values: [1, 3, 5, 10]

@@ -80,6 +80,12 @@ class RetrievalHit:
     pre_rerank_rank: int | None = None
     reranker_backend: str | None = None
     reranker_model: str | None = None
+    multi_query_fusion_score: float | None = None
+    multi_query_fusion_rank: int | None = None
+    query_variant_hits: list[dict[str, Any]] = field(default_factory=list)
+    original_query_recalled: bool = False
+    rewrite_query_recalled: bool = False
+    expansion_query_recalled: bool = False
     retrieval_sources: list[str] = field(default_factory=list)
 
     def to_dict(self, *, include_text: bool = True) -> dict[str, Any]:
@@ -111,6 +117,12 @@ class RetrievalHit:
             "pre_rerank_rank": self.pre_rerank_rank,
             "reranker_backend": self.reranker_backend,
             "reranker_model": self.reranker_model,
+            "multi_query_fusion_score": self.multi_query_fusion_score,
+            "multi_query_fusion_rank": self.multi_query_fusion_rank,
+            "query_variant_hits": self.query_variant_hits,
+            "original_query_recalled": self.original_query_recalled,
+            "rewrite_query_recalled": self.rewrite_query_recalled,
+            "expansion_query_recalled": self.expansion_query_recalled,
             "retrieval_sources": self.retrieval_sources,
         }
         if include_text:
@@ -129,6 +141,7 @@ class RetrievalResponse:
     latency_ms: float
     trace: dict[str, Any]
     retrieval_latency_ms: float | None = None
+    rewrite_latency_ms: float = 0.0
     rerank_latency_ms: float = 0.0
     total_latency_ms: float | None = None
 
@@ -141,6 +154,7 @@ class RetrievalResponse:
             "filters": self.filters.to_dict(),
             "latency_ms": self.latency_ms,
             "retrieval_latency_ms": self.retrieval_latency_ms if self.retrieval_latency_ms is not None else self.latency_ms,
+            "rewrite_latency_ms": self.rewrite_latency_ms,
             "rerank_latency_ms": self.rerank_latency_ms,
             "total_latency_ms": self.total_latency_ms if self.total_latency_ms is not None else self.latency_ms,
             "trace": self.trace,

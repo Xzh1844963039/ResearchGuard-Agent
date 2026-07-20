@@ -37,6 +37,11 @@ def build_parser() -> argparse.ArgumentParser:
     rerank_group.add_argument("--no-rerank", dest="rerank", action="store_false", help="Disable reranking.")
     parser.set_defaults(rerank=None)
     parser.add_argument("--rerank-candidate-k", type=int, default=None)
+    rewrite_group = parser.add_mutually_exclusive_group()
+    rewrite_group.add_argument("--rewrite", dest="rewrite", action="store_true", help="Use one normalized query.")
+    rewrite_group.add_argument("--no-rewrite", dest="rewrite", action="store_false", help="Disable query rewrite.")
+    parser.set_defaults(rewrite=None)
+    parser.add_argument("--multi-query", action="store_true", help="Retrieve original, normalized, and expansion queries.")
     parser.add_argument("--doc-id", action="append", default=[], help="Repeatable or comma-separated doc_id filter.")
     parser.add_argument("--section", action="append", default=[], help="Repeatable or comma-separated section filter.")
     parser.add_argument("--chunk-type", action="append", default=[], help="Repeatable or comma-separated chunk_type filter.")
@@ -52,7 +57,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
-    args = build_parser().parse_args()
+    parser = build_parser()
+    args = parser.parse_args()
+    if args.multi_query and args.rewrite is False:
+        parser.error("--multi-query cannot be combined with --no-rewrite.")
     filters = MetadataFilter(
         doc_ids=comma_values(args.doc_id),
         sections=comma_values(args.section),
@@ -71,6 +79,8 @@ def main() -> int:
         filters=filters,
         rerank=args.rerank,
         rerank_candidate_k=args.rerank_candidate_k,
+        rewrite=args.rewrite,
+        multi_query=bool(args.multi_query),
     )
     payload: dict[str, Any] = response.to_dict(include_text=args.include_text)
     if not args.include_text:

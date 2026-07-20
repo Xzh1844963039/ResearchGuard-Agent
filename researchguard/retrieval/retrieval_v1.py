@@ -16,6 +16,9 @@ from researchguard.retrieval.dense_backend import DenseRetrieverBackend, NumpyDe
 from researchguard.retrieval.filters import metadata_matches
 from researchguard.retrieval.index_loader import RetrievalIndexBundle, load_index_bundle
 from researchguard.retrieval.models import MetadataFilter, RetrievalError, RetrievalHit, RetrievalResponse
+from researchguard.retrieval.multi_query import build_query_variants, fuse_query_rankings
+from researchguard.retrieval.query_rewrite_pipeline import QueryRewritePipeline
+from researchguard.retrieval.query_rewriter import QueryRewriteResult, load_query_rewrite_settings
 from researchguard.retrieval.rerank_pipeline import RerankPipeline
 from researchguard.retrieval.reranker import load_reranker_settings
 
@@ -34,6 +37,7 @@ class RetrievalEngine:
             )
         self.embedding_provider = OpenAIEmbeddingProvider(embedding_config)
         self._query_vector_cache: dict[str, np.ndarray] = {}
+        self.query_embedding_api_call_count = 0
         dense_cfg = self.config.get("dense", {}) or {}
         backend_name = str(dense_backend_override or dense_cfg.get("backend", "numpy"))
         if backend_name == "numpy":
@@ -49,6 +53,10 @@ class RetrievalEngine:
         reranker_config_path = reranker_cfg.get("config_path", "configs/reranker_v1.yaml")
         _, self.reranker_settings = load_reranker_settings(reranker_config_path)
         self._rerank_pipeline: RerankPipeline | None = None
+        rewrite_cfg = self.config.get("query_rewrite", {}) or {}
+        rewrite_config_path = rewrite_cfg.get("config_path", "configs/query_rewrite_v1.yaml")
+        _, self.query_rewrite_settings = load_query_rewrite_settings(rewrite_config_path)
+        self._query_rewrite_pipeline: QueryRewritePipeline | None = None
 
     @classmethod
     def from_config(
@@ -73,6 +81,10 @@ class RetrievalEngine:
         rerank: bool | None = None,
         rerank_candidate_k: int | None = None,
         rerank_read_cache: bool = True,
+        rewrite: bool | None = None,
+        multi_query: bool = False,
+        rewrite_result: QueryRewriteResult | None = None,
+        rewrite_read_cache: bool = True,
     ) -> RetrievalResponse:
         normalized_query = str(query or "").strip()
         if not normalized_query:
@@ -81,6 +93,11 @@ class RetrievalEngine:
         mode = str(mode or retrieval_cfg.get("default_mode", "hybrid"))
         if mode not in VALID_MODES:
             raise RetrievalError(f"Unsupported retrieval mode: {mode}")
+        rewrite_enabled = self.query_rewrite_settings.enabled if rewrite is None else bool(rewrite)
+        if multi_query:
+            rewrite_enabled = True
+        if rewrite_enabled and mode != "hybrid":
+            raise RetrievalError("Query Rewrite v1 only supports hybrid retrieval.")
         rerank_enabled = self.reranker_settings.enabled if rerank is None else bool(rerank)
         if rerank_enabled and mode != "hybrid":
             raise RetrievalError("Reranker v1 only supports hybrid retrieval candidates.")
@@ -105,6 +122,7 @@ class RetrievalEngine:
         filters = filters or MetadataFilter()
 
         started = time.perf_counter()
+        embedding_calls_before = self.query_embedding_api_call_count
         trace: dict[str, Any] = {
             "index_dir": str(self.bundle.index_dir),
             "corpus_fingerprint": self.bundle.manifest.get("corpus_fingerprint"),
@@ -112,10 +130,51 @@ class RetrievalEngine:
             "candidate_k": candidate_k,
             "dense_backend": self.dense_backend_name,
             "rerank_enabled": rerank_enabled,
+            "query_rewrite_enabled": rewrite_enabled,
+            "multi_query_enabled": bool(multi_query),
         }
 
+        rewrite_latency_ms = 0.0
+        query_variants = []
+        if rewrite_enabled:
+            if rewrite_result is None:
+                rewrite_result = self.rewrite_query(normalized_query, read_cache=rewrite_read_cache)
+            elif " ".join(rewrite_result.original_query.split()) != normalized_query:
+                raise RetrievalError("Provided rewrite_result does not match the retrieval query.")
+            rewrite_latency_ms = float(rewrite_result.latency_ms)
+            query_variants, duplicate_queries_removed = build_query_variants(
+                rewrite_result,
+                multi_query=bool(multi_query),
+            )
+            if not query_variants:
+                raise RetrievalError("Query rewrite produced no usable retrieval variants after fallback.")
+            trace["query_rewrite"] = {
+                **rewrite_result.to_dict(),
+                "variants": [variant.to_dict() for variant in query_variants],
+                "duplicate_queries_removed": duplicate_queries_removed,
+            }
+
         retrieval_started = time.perf_counter()
-        if mode == "dense":
+        if rewrite_enabled:
+            variant_rankings: list[tuple[Any, list[dict[str, Any]]]] = []
+            variant_dense_traces: list[dict[str, Any]] = []
+            for variant in query_variants:
+                variant_candidates = self._hybrid_candidates(variant.query, candidate_k, filters)
+                variant_rankings.append((variant, variant_candidates))
+                variant_dense_traces.append(
+                    {
+                        "variant_id": variant.variant_id,
+                        "query": variant.query,
+                        "trace": dict(self._last_dense_trace),
+                    }
+                )
+            ranked = fuse_query_rankings(
+                variant_rankings,
+                rrf_k=self.query_rewrite_settings.multi_query_rrf_k,
+                candidate_k=candidate_k,
+            )
+            trace["query_variant_dense_traces"] = variant_dense_traces
+        elif mode == "dense":
             ranked = self._dense_candidates(normalized_query, candidate_k, filters)
         elif mode == "sparse":
             ranked = self._sparse_candidates(normalized_query, candidate_k, filters)
@@ -151,6 +210,7 @@ class RetrievalEngine:
         trace["retrieval_latency_ms"] = retrieval_latency_ms
         trace["rerank_latency_ms"] = rerank_latency_ms
         trace["total_latency_ms"] = total_latency_ms
+        trace["query_embedding_api_calls"] = self.query_embedding_api_call_count - embedding_calls_before
         if mode in {"dense", "hybrid"}:
             trace["dense_backend_trace"] = self._last_dense_trace
         return RetrievalResponse(
@@ -163,19 +223,29 @@ class RetrievalEngine:
             latency_ms=total_latency_ms,
             trace=trace,
             retrieval_latency_ms=retrieval_latency_ms,
+            rewrite_latency_ms=rewrite_latency_ms,
             rerank_latency_ms=rerank_latency_ms,
             total_latency_ms=total_latency_ms,
         )
+
+    def rewrite_query(self, query: str, *, read_cache: bool = True) -> QueryRewriteResult:
+        return self._get_query_rewrite_pipeline().rewrite(query, read_cache=read_cache)
 
     def _get_rerank_pipeline(self) -> RerankPipeline:
         if self._rerank_pipeline is None:
             self._rerank_pipeline = RerankPipeline(self.reranker_settings)
         return self._rerank_pipeline
 
+    def _get_query_rewrite_pipeline(self) -> QueryRewritePipeline:
+        if self._query_rewrite_pipeline is None:
+            self._query_rewrite_pipeline = QueryRewritePipeline(self.query_rewrite_settings)
+        return self._query_rewrite_pipeline
+
     def _embed_query(self, query: str) -> np.ndarray:
         if query in self._query_vector_cache:
             return self._query_vector_cache[query]
         vector = self.embedding_provider.embed_query(query)
+        self.query_embedding_api_call_count += 1
         validate_vector(vector, dimensions=self.bundle.dense_index.dimension)
         query_vector = np.asarray(vector, dtype="float32")
         self._query_vector_cache[query] = query_vector
@@ -306,5 +376,11 @@ class RetrievalEngine:
             pre_rerank_rank=candidate.get("pre_rerank_rank"),
             reranker_backend=candidate.get("reranker_backend"),
             reranker_model=candidate.get("reranker_model"),
+            multi_query_fusion_score=candidate.get("multi_query_fusion_score"),
+            multi_query_fusion_rank=candidate.get("multi_query_fusion_rank"),
+            query_variant_hits=list(candidate.get("query_variant_hits", [])),
+            original_query_recalled=bool(candidate.get("original_query_recalled", False)),
+            rewrite_query_recalled=bool(candidate.get("rewrite_query_recalled", False)),
+            expansion_query_recalled=bool(candidate.get("expansion_query_recalled", False)),
             retrieval_sources=list(candidate.get("retrieval_sources", [])),
         )

@@ -51,6 +51,7 @@ embedding_cache/
 cache/
 data/cache/reranker_v1/
 data/cache/reranker_models/
+data/cache/query_rewrite_v1/
 .cache/huggingface/
 .cache/torch/
 *.safetensors

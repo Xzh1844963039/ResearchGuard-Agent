@@ -25,6 +25,9 @@ filters:
 reranker:
   config_path: "C:\\Users\\18449\\Desktop\\researchguard_workspace\\configs\\reranker_v1.yaml"
 
+query_rewrite:
+  config_path: "C:\\Users\\18449\\Desktop\\researchguard_workspace\\configs\\query_rewrite_v1.yaml"
+
 validation:
   benchmark_path: "C:\\Users\\18449\\Desktop\\researchguard_workspace\\data\\eval\\retrieval_v1_queries.jsonl"
   output_dir: "C:\\Users\\18449\\Desktop\\researchguard_workspace\\outputs\\retrieval_validation_v1"
