@@ -13,11 +13,13 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from researchguard.retrieval import (
     AnswerGenerationPipeline,
+    CitationAuditPipeline,
     EvidenceSufficiencyPipeline,
     MetadataFilter,
     RetrievalEngine,
 )
 from researchguard.retrieval.answer_generator import load_answer_generation_settings
+from researchguard.retrieval.claim_extractor import load_citation_audit_settings
 from researchguard.retrieval.evidence_judge import load_evidence_judge_settings
 
 
@@ -27,6 +29,9 @@ DEFAULT_EVIDENCE_CONFIG = Path(
 )
 DEFAULT_ANSWER_CONFIG = Path(
     r"C:\Users\18449\Desktop\researchguard_workspace\configs\answer_generation_v1.yaml"
+)
+DEFAULT_CITATION_AUDIT_CONFIG = Path(
+    r"C:\Users\18449\Desktop\researchguard_workspace\configs\citation_audit_v1.yaml"
 )
 
 
@@ -71,6 +76,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=str(DEFAULT_ANSWER_CONFIG),
         help="Path to answer_generation_v1.yaml.",
     )
+    parser.add_argument(
+        "--citation-audit",
+        action="store_true",
+        help="Extract and verify atomic claims after answer generation.",
+    )
+    parser.add_argument(
+        "--citation-audit-config",
+        default=str(DEFAULT_CITATION_AUDIT_CONFIG),
+        help="Path to citation_audit_v1.yaml.",
+    )
     parser.add_argument("--doc-id", action="append", default=[], help="Repeatable or comma-separated doc_id filter.")
     parser.add_argument("--section", action="append", default=[], help="Repeatable or comma-separated section filter.")
     parser.add_argument("--chunk-type", action="append", default=[], help="Repeatable or comma-separated chunk_type filter.")
@@ -92,6 +107,8 @@ def main() -> int:
         parser.error("--multi-query cannot be combined with --no-rewrite.")
     if args.generate_answer and not args.evidence_check:
         parser.error("--generate-answer requires --evidence-check.")
+    if args.citation_audit and not args.generate_answer:
+        parser.error("--citation-audit requires --generate-answer.")
     filters = MetadataFilter(
         doc_ids=comma_values(args.doc_id),
         sections=comma_values(args.section),
@@ -115,6 +132,7 @@ def main() -> int:
     )
     payload: dict[str, Any] = response.to_dict(include_text=args.include_text)
     evidence_result = None
+    answer_result = None
     if args.evidence_check:
         _, evidence_settings = load_evidence_judge_settings(args.evidence_config)
         evidence_result = EvidenceSufficiencyPipeline(evidence_settings).assess(args.query, response.hits)
@@ -133,6 +151,17 @@ def main() -> int:
             float(response.total_latency_ms or response.latency_ms)
             + evidence_result.latency_ms
             + answer_result.latency_ms
+        )
+    if args.citation_audit and answer_result is not None:
+        _, audit_settings = load_citation_audit_settings(args.citation_audit_config)
+        audit_result = CitationAuditPipeline(audit_settings).audit(answer_result, response.hits)
+        payload["citation_audit"] = audit_result.to_dict()
+        payload["citation_audit_latency_ms"] = audit_result.latency_ms
+        payload["grounded_answer_pipeline_total_latency_ms"] = (
+            float(response.total_latency_ms or response.latency_ms)
+            + float(evidence_result.latency_ms if evidence_result is not None else 0.0)
+            + answer_result.latency_ms
+            + audit_result.latency_ms
         )
     if not args.include_text:
         for hit in payload["hits"]:

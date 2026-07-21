@@ -9,6 +9,7 @@ from researchguard.retrieval.evidence_judge import EvidenceSufficiencyResult
 from researchguard.retrieval.evidence_pipeline import EvidenceSufficiencyPipeline
 from researchguard.retrieval.answer_generator import AnswerGenerationResult
 from researchguard.retrieval.answer_pipeline import AnswerGenerationPipeline
+from researchguard.retrieval.citation_audit import CitationAuditPipeline, CitationAuditResult
 
 __all__ = [
     "MetadataFilter",
@@ -23,6 +24,8 @@ __all__ = [
     "EvidenceSufficiencyResult",
     "AnswerGenerationPipeline",
     "AnswerGenerationResult",
+    "CitationAuditPipeline",
+    "CitationAuditResult",
     "RetrievalError",
     "RetrievalHit",
     "RetrievalResponse",
