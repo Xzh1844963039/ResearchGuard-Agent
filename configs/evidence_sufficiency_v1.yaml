@@ -1,0 +1,24 @@
+evidence_judge:
+  enabled: false
+  backend: "openai"
+  model: "gpt-4.1-mini"
+  temperature: 0
+  timeout: 30
+  max_retries: 2
+  prompt_version: "evidence_sufficiency_v1.6"
+  config_version: "evidence_sufficiency_v1.5"
+  cache_enabled: true
+  cache_directory: "data/cache/evidence_sufficiency_v1"
+  max_evidence_chunks: 10
+  max_chars_per_chunk: 1800
+
+validation:
+  benchmark_path: "data/eval/evidence_sufficiency_v1_queries.jsonl"
+  retrieval_benchmark_path: "data/eval/retrieval_v1_queries.jsonl"
+  retrieval_config_path: "configs/retrieval_v1.yaml"
+  output_directory: "outputs/evidence_sufficiency_validation_v1"
+  retrieval_candidate_k: 80
+  rerank_candidate_k: 20
+  evidence_top_k: 10
+  rewrite_enabled: true
+  multi_query_enabled: true

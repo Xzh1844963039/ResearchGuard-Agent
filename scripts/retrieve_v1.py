@@ -11,10 +11,14 @@ PROJECT_ROOT = Path(r"C:\Users\18449\Desktop\researchguard_workspace")
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from researchguard.retrieval import MetadataFilter, RetrievalEngine
+from researchguard.retrieval import EvidenceSufficiencyPipeline, MetadataFilter, RetrievalEngine
+from researchguard.retrieval.evidence_judge import load_evidence_judge_settings
 
 
 DEFAULT_CONFIG = Path(r"C:\Users\18449\Desktop\researchguard_workspace\configs\retrieval_v1.yaml")
+DEFAULT_EVIDENCE_CONFIG = Path(
+    r"C:\Users\18449\Desktop\researchguard_workspace\configs\evidence_sufficiency_v1.yaml"
+)
 
 
 def comma_values(values: list[str] | None) -> tuple[str, ...]:
@@ -42,6 +46,12 @@ def build_parser() -> argparse.ArgumentParser:
     rewrite_group.add_argument("--no-rewrite", dest="rewrite", action="store_false", help="Disable query rewrite.")
     parser.set_defaults(rewrite=None)
     parser.add_argument("--multi-query", action="store_true", help="Retrieve original, normalized, and expansion queries.")
+    parser.add_argument("--evidence-check", action="store_true", help="Judge whether final Top-k evidence supports answering.")
+    parser.add_argument(
+        "--evidence-config",
+        default=str(DEFAULT_EVIDENCE_CONFIG),
+        help="Path to evidence_sufficiency_v1.yaml.",
+    )
     parser.add_argument("--doc-id", action="append", default=[], help="Repeatable or comma-separated doc_id filter.")
     parser.add_argument("--section", action="append", default=[], help="Repeatable or comma-separated section filter.")
     parser.add_argument("--chunk-type", action="append", default=[], help="Repeatable or comma-separated chunk_type filter.")
@@ -83,6 +93,11 @@ def main() -> int:
         multi_query=bool(args.multi_query),
     )
     payload: dict[str, Any] = response.to_dict(include_text=args.include_text)
+    if args.evidence_check:
+        _, evidence_settings = load_evidence_judge_settings(args.evidence_config)
+        evidence_result = EvidenceSufficiencyPipeline(evidence_settings).assess(args.query, response.hits)
+        payload["evidence_sufficiency"] = evidence_result.to_dict()
+        payload["evidence_check_latency_ms"] = evidence_result.latency_ms
     if not args.include_text:
         for hit in payload["hits"]:
             source_text = engine.bundle.document_by_id[hit["chunk_id"]].get("text", "")

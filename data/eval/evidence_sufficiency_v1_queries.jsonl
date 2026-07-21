@@ -1,0 +1,44 @@
+{"query":"What is the core idea of Retrieval-Augmented Generation for knowledge-intensive NLP tasks?","answerable":true,"support_level":"strong"}
+{"query":"How does RAG combine parametric memory with non-parametric retrieved documents?","answerable":true,"support_level":"strong"}
+{"query":"What is the difference between RAG-Sequence and RAG-Token?","answerable":true,"support_level":"strong"}
+{"query":"Which open-domain QA tasks were used to evaluate RAG?","answerable":true,"support_level":"strong"}
+{"query":"What does the RAG paper report about FEVER fact verification?","answerable":true,"support_level":"strong"}
+{"query":"Where does the RAG paper discuss REALM and ORQA as related retriever-based models?","answerable":true,"support_level":"strong"}
+{"query":"Find RAG chunks that contain captions or figures about generated outputs and results.","answerable":true,"support_level":"strong"}
+{"query":"What is the ReAct paper's main claim about interleaving reasoning traces and actions?","answerable":true,"support_level":"strong"}
+{"query":"Which benchmarks does ReAct evaluate for question answering, fact verification, ALFWorld, and WebShop?","answerable":true,"support_level":"strong"}
+{"query":"How are ReAct prompts composed for HotpotQA and FEVER?","answerable":true,"support_level":"strong"}
+{"query":"What results does ReAct report on ALFWorld success rate compared with Act and BUTLER?","answerable":true,"support_level":"strong"}
+{"query":"Where are ReAct tables or captions about HotpotQA scaling and prompting results?","answerable":true,"support_level":"strong"}
+{"query":"Retrieve equation-like chunks from the ReAct paper around reasoning and action formulation.","answerable":true,"support_level":"strong"}
+{"query":"What does SelfCheckGPT mean by zero-resource black-box hallucination detection?","answerable":true,"support_level":"strong"}
+{"query":"How does SelfCheckGPT use multiple sampled responses to detect hallucination?","answerable":true,"support_level":"strong"}
+{"query":"Which SelfCheckGPT methods compare NLI, QA, BERTScore, n-gram and LLM probabilities?","answerable":true,"support_level":"strong"}
+{"query":"What does the SelfCheckGPT ablation table say about sentence-level and passage-level scores?","answerable":true,"support_level":"strong"}
+{"query":"What limitations does SelfCheckGPT report about WikiBio and generalization?","answerable":true,"support_level":"strong"}
+{"query":"What problem does Corrective Retrieval-Augmented Generation address when retrieved documents are wrong?","answerable":true,"support_level":"strong"}
+{"query":"How does CRAG use a lightweight retrieval evaluator to judge retrieved documents?","answerable":true,"support_level":"strong"}
+{"query":"What does CRAG do for knowledge refinement after evaluating retrieval quality?","answerable":true,"support_level":"strong"}
+{"query":"Why does CRAG consider web search as complementary external knowledge?","answerable":true,"support_level":"strong"}
+{"query":"Which chunks show CRAG figures or captions around the retrieval evaluator pipeline?","answerable":true,"support_level":"strong"}
+{"query":"What is ALCE and why does it evaluate citation quality for LLM generations?","answerable":true,"support_level":"strong"}
+{"query":"Which datasets does the citation paper use: ASQA, QAMPARI, and ELI5?","answerable":true,"support_level":"strong"}
+{"query":"How does the citation paper define citation recall and citation precision?","answerable":true,"support_level":"strong"}
+{"query":"Where does the citation paper discuss retrieval recall using DPR, GTR, and BM25?","answerable":true,"support_level":"strong"}
+{"query":"What post-editing or interactive citation refinement strategies are described?","answerable":true,"support_level":"strong"}
+{"query":"Which results mention reranking passages improving citation quality?","answerable":true,"support_level":"strong"}
+{"query":"Find table or equation chunks in the citation paper around citation recall formulas and retrieval examples.","answerable":true,"support_level":"strong"}
+{"query":"Compare ReAct and RAG: which chunks explain interacting with external information versus retrieved documents?","answerable":true,"support_level":"strong"}
+{"query":"Compare CRAG and SelfCheckGPT on hallucination mitigation without doing answer generation.","answerable":true,"support_level":"strong"}
+{"query":"Find evidence about citation quality and evidence audit style evaluation in the citation paper and ResearchGuard-like setting.","answerable":false,"support_level":"partial"}
+{"query":"Which papers discuss retrieval errors causing hallucination or incorrect answers?","answerable":true,"support_level":"strong"}
+{"query":"Return only references related to ReAct or RAG citations from the indexed papers.","answerable":true,"support_level":"strong"}
+{"query":"Which chunks discuss limitations or caveats in SelfCheckGPT and ALCE?","answerable":true,"support_level":"strong"}
+{"query":"Does any indexed paper describe quantum error correction for superconducting qubits?","answerable":false,"support_level":"unsupported"}
+{"query":"Which chunk explains convolutional neural networks for medical image segmentation?","answerable":false,"support_level":"unsupported"}
+{"query":"Find a paper in this corpus about reinforcement learning for autonomous driving LiDAR perception.","answerable":false,"support_level":"unsupported"}
+{"query":"Which indexed paper reports clinical trial outcomes for a cancer immunotherapy drug?","answerable":false,"support_level":"unsupported"}
+{"query":"Does CRAG use a lightweight retrieval evaluator and GPT-5 to judge retrieved documents?","answerable":false,"support_level":"partial"}
+{"query":"Does SelfCheckGPT use sampled model responses and convolutional neural networks for medical image segmentation to detect hallucinations?","answerable":false,"support_level":"partial"}
+{"query":"Does the citation paper evaluate ASQA, QAMPARI, and ELI5 and report cancer immunotherapy clinical trial outcomes?","answerable":false,"support_level":"partial"}
+{"query":"Does RAG combine parametric and non-parametric memory for superconducting-qubit quantum error correction?","answerable":false,"support_level":"partial"}

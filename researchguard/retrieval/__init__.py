@@ -5,6 +5,8 @@ from researchguard.retrieval.chroma_retriever import ChromaDenseRetrieverBackend
 from researchguard.retrieval.dense_backend import DenseRetrieverBackend, NumpyDenseRetrieverBackend
 from researchguard.retrieval.reranker import CrossEncoderReranker, RerankerBackend
 from researchguard.retrieval.query_rewriter import QueryRewriteResult
+from researchguard.retrieval.evidence_judge import EvidenceSufficiencyResult
+from researchguard.retrieval.evidence_pipeline import EvidenceSufficiencyPipeline
 
 __all__ = [
     "MetadataFilter",
@@ -15,6 +17,8 @@ __all__ = [
     "RerankerBackend",
     "CrossEncoderReranker",
     "QueryRewriteResult",
+    "EvidenceSufficiencyPipeline",
+    "EvidenceSufficiencyResult",
     "RetrievalError",
     "RetrievalHit",
     "RetrievalResponse",
