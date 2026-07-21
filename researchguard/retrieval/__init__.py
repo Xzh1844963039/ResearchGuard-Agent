@@ -7,6 +7,8 @@ from researchguard.retrieval.reranker import CrossEncoderReranker, RerankerBacke
 from researchguard.retrieval.query_rewriter import QueryRewriteResult
 from researchguard.retrieval.evidence_judge import EvidenceSufficiencyResult
 from researchguard.retrieval.evidence_pipeline import EvidenceSufficiencyPipeline
+from researchguard.retrieval.answer_generator import AnswerGenerationResult
+from researchguard.retrieval.answer_pipeline import AnswerGenerationPipeline
 
 __all__ = [
     "MetadataFilter",
@@ -19,6 +21,8 @@ __all__ = [
     "QueryRewriteResult",
     "EvidenceSufficiencyPipeline",
     "EvidenceSufficiencyResult",
+    "AnswerGenerationPipeline",
+    "AnswerGenerationResult",
     "RetrievalError",
     "RetrievalHit",
     "RetrievalResponse",

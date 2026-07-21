@@ -11,13 +11,22 @@ PROJECT_ROOT = Path(r"C:\Users\18449\Desktop\researchguard_workspace")
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from researchguard.retrieval import EvidenceSufficiencyPipeline, MetadataFilter, RetrievalEngine
+from researchguard.retrieval import (
+    AnswerGenerationPipeline,
+    EvidenceSufficiencyPipeline,
+    MetadataFilter,
+    RetrievalEngine,
+)
+from researchguard.retrieval.answer_generator import load_answer_generation_settings
 from researchguard.retrieval.evidence_judge import load_evidence_judge_settings
 
 
 DEFAULT_CONFIG = Path(r"C:\Users\18449\Desktop\researchguard_workspace\configs\retrieval_v1.yaml")
 DEFAULT_EVIDENCE_CONFIG = Path(
     r"C:\Users\18449\Desktop\researchguard_workspace\configs\evidence_sufficiency_v1.yaml"
+)
+DEFAULT_ANSWER_CONFIG = Path(
+    r"C:\Users\18449\Desktop\researchguard_workspace\configs\answer_generation_v1.yaml"
 )
 
 
@@ -52,6 +61,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=str(DEFAULT_EVIDENCE_CONFIG),
         help="Path to evidence_sufficiency_v1.yaml.",
     )
+    parser.add_argument(
+        "--generate-answer",
+        action="store_true",
+        help="Generate an evidence-grounded answer after the Evidence Sufficiency gate.",
+    )
+    parser.add_argument(
+        "--answer-config",
+        default=str(DEFAULT_ANSWER_CONFIG),
+        help="Path to answer_generation_v1.yaml.",
+    )
     parser.add_argument("--doc-id", action="append", default=[], help="Repeatable or comma-separated doc_id filter.")
     parser.add_argument("--section", action="append", default=[], help="Repeatable or comma-separated section filter.")
     parser.add_argument("--chunk-type", action="append", default=[], help="Repeatable or comma-separated chunk_type filter.")
@@ -71,6 +90,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.multi_query and args.rewrite is False:
         parser.error("--multi-query cannot be combined with --no-rewrite.")
+    if args.generate_answer and not args.evidence_check:
+        parser.error("--generate-answer requires --evidence-check.")
     filters = MetadataFilter(
         doc_ids=comma_values(args.doc_id),
         sections=comma_values(args.section),
@@ -93,11 +114,26 @@ def main() -> int:
         multi_query=bool(args.multi_query),
     )
     payload: dict[str, Any] = response.to_dict(include_text=args.include_text)
+    evidence_result = None
     if args.evidence_check:
         _, evidence_settings = load_evidence_judge_settings(args.evidence_config)
         evidence_result = EvidenceSufficiencyPipeline(evidence_settings).assess(args.query, response.hits)
         payload["evidence_sufficiency"] = evidence_result.to_dict()
         payload["evidence_check_latency_ms"] = evidence_result.latency_ms
+    if args.generate_answer and evidence_result is not None:
+        _, answer_settings = load_answer_generation_settings(args.answer_config)
+        answer_result = AnswerGenerationPipeline(answer_settings).generate(
+            args.query,
+            response.hits,
+            evidence_result,
+        )
+        payload["answer_generation"] = answer_result.to_dict()
+        payload["answer_generation_latency_ms"] = answer_result.latency_ms
+        payload["answer_pipeline_total_latency_ms"] = (
+            float(response.total_latency_ms or response.latency_ms)
+            + evidence_result.latency_ms
+            + answer_result.latency_ms
+        )
     if not args.include_text:
         for hit in payload["hits"]:
             source_text = engine.bundle.document_by_id[hit["chunk_id"]].get("text", "")
