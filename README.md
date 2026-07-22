@@ -1331,6 +1331,53 @@ Pipeline 保存总 start/end 和总 latency；RetrievalEngine 内部提供 rewri
 
 `scripts/validate_pipeline_v1.py` 包含 6 个 synthetic tests 和 3 条真实 E2E：strong query 必须生成并完成 grounded audit；unsupported 与 partial 必须在生成前拒绝；另验证模块关闭、异常 schema 和重复输入稳定性。验证同时将 Pipeline Top-10 与直接 Retrieval Top-10 比较，并检查 warm cache。当前结论 `PASS`，八项 hard checks 全为 0。
 
+## Streamlit Demo v1 / Demo Usage
+
+### 定位与调用边界
+
+`demo/app.py` 是当前 Unified Pipeline v1 的本地可视化展示层。页面通过 `ResearchGuardPipeline.from_config(...)` 创建可复用实例，并且每次查询只调用公开的 `pipeline.run(query)`；它不复制 Rewrite、Retrieval、Reranker、Evidence、Answer 或 Citation Audit 的内部逻辑，也不新增模型、数据库或 prompt。
+
+页面包含：
+
+- query 输入和固定 demo questions；
+- 六阶段 status、latency 和失败 reason；
+- reranked evidence 的 rank、document、section、page、score、chunk text 和 chunk ID；
+- Evidence Sufficiency 的 support level、confidence 和 reason；
+- grounded answer、answer citations 或统一拒答；
+- claim-level Citation Audit、support status、reason 和 canonical citations；
+- `Show Pipeline Details` 调试面板，展示脱敏后的 stage status、latency、model、config version 和 Pipeline JSON。
+
+`demo/utils.py` 只负责 result schema 检查、展示视图转换、score/page/document 格式化和输出脱敏。本地绝对路径、cache/model/index path、API key 模式和环境变量不会显示在页面。Pipeline/API/JSON 异常会转成页面错误状态，不打印 stack trace 或环境内容。
+
+### 安装与启动
+
+完整环境按项目依赖安装；`requirements.txt` 已固定 `streamlit==1.58.0`。只补装 Streamlit 时可运行：
+
+```powershell
+& "C:\Users\18449\Desktop\researchguard_workspace\.venv\Scripts\python.exe" -m pip install streamlit
+```
+
+从项目根目录启动：
+
+```powershell
+cd C:\Users\18449\Desktop\researchguard_workspace
+& ".\.venv\Scripts\python.exe" -m streamlit run demo\app.py
+```
+
+虚拟环境已激活时也可使用：
+
+```powershell
+streamlit run demo/app.py
+```
+
+默认本地地址为 `http://localhost:8501`。Dense/Hybrid Retrieval 和未命中 cache 的 LLM 阶段仍需要项目既有 `OPENAI_API_KEY`；Demo 不读取、记录或显示 key。
+
+### Demo validation
+
+`scripts/validate_demo_v1.py` 使用 Streamlit `AppTest` 检查页面可启动，再用现有 Pipeline 跑一条 strong 和一条 unsupported 真实查询。当前验证结论 `PASS`：strong 得到 `grounded`、10 条 evidence、1 条 answer citation 和 4 条 audited claims；unsupported 得到 `rejected`，Answer/Audit 均 `skipped`，没有 citation 或 claim。四项 hard checks 全为 0，包括页面启动、strong render contract、unsupported render contract 和 display sanitization。
+
+页面还在 1440x900 与 390x844 视口完成浏览器检查：桌面为三列阶段状态，移动端为单列状态并自动收起 sidebar；未发现文字覆盖、横向溢出或状态卡布局漂移。本阶段只提供本地单用户 demo，不是生产 UI 或 API。
+
 ## 12. 目录结构
 
 ```text
@@ -1343,6 +1390,7 @@ researchguard/audit/          Evidence audit 相关能力，部分实现
 researchguard/memory/         memory / trace 存储能力，部分实现
 researchguard/evaluation/     legacy answer / agentic evaluation 模块；当前各 v1 validation 位于 scripts
 researchguard/reporting/      audit report 渲染能力，部分实现
+demo/                         Streamlit Demo v1 页面和纯展示/脱敏工具
 scripts/                      验证、构建和本地功能测试脚本，包括 validate_pipeline_v1.py
 configs/                      parser/index/retrieval/Chroma/reranker/rewrite/evidence/answer/audit/pipeline 等配置
 data/eval/                    Retrieval、Evidence Sufficiency、Answer Generation 与 Citation Audit 独立 benchmark
@@ -1381,6 +1429,7 @@ outputs/evidence_sufficiency_validation_v1/  answerability/support-level/hard-ch
 outputs/answer_generation_validation_v1/  answer/citation/refusal/grounding/hard-check 正式报告
 outputs/citation_audit_validation_v1/  claim/citation/grounding/hard-check 正式报告
 outputs/pipeline_validation_v1/  unified pipeline synthetic、E2E、schema、cache、regression 和 latency 报告
+outputs/demo_validation_v1/   Streamlit startup、strong/unsupported render contract 和脱敏验证报告
 ```
 
 ## 13. 当前阶段状态
@@ -1398,10 +1447,11 @@ outputs/pipeline_validation_v1/  unified pipeline synthetic、E2E、schema、cac
 | Answer Generation | 已完成 v1 并通过验证 | strong gate、supporting-only evidence、strict JSON、citation provenance、cache/fallback、CLI 和 22-query validation 已完成；hard checks 全 0，结论 `PASS`。 |
 | Claim Verification / Citation Audit | 已完成 v1 并通过验证 | atomic extraction、answer-time evidence matching、逐 claim 三分类、canonical citations、cache、CLI 和 12-answer/26-claim validation 已完成；hard checks 全 0，结论 `PASS`。 |
 | Pipeline Integration | 已完成 v1 并通过验证 | 已提供统一 Python API、YAML、CLI、evidence gate、stage schema/latency 和三类真实 E2E；6/6 synthetic tests 与八项 hard checks 全过，结论 `PASS`。 |
+| Streamlit Demo | 已完成 v1 并通过验证 | 已直接接入 Unified Pipeline，展示 stage/evidence/sufficiency/answer/audit/debug；startup、strong、unsupported、脱敏和桌面/移动浏览器检查通过，结论 `PASS`。 |
 | Agentic RAG | 已迁移但未重构 | legacy 模块存在，尚未接入当前 Retrieval/Reranker/Evidence/Answer/Audit 主流程；当前没有 tool retry、LangGraph 或多 Agent workflow。 |
 | Evidence Audit | v1 主链路已实现，legacy 能力未整合 | 新 Citation Audit v1 已接入；`researchguard/audit` 中旧模块仍未与新主流程产品化整合。 |
 | Evaluation | 部分实现 | Retrieval、Reranker、Rewrite、Evidence、Answer 和 Citation Audit 均有独立 validation；agentic 与生产级 blind hold-out 尚未完成。 |
-| Frontend/API | 尚未完成产品化 | `frontend` 和 `researchguard/api` 存在，但未完成产品级 UI/API。 |
+| Frontend/API | 本地 Demo 已完成，尚未产品化 | `demo/app.py` 已提供 Streamlit Demo v1；旧 `frontend` 和 `researchguard/api` 仍未重构为带鉴权、并发、部署和稳定 API contract 的产品。 |
 
 ## 14. 数据和 benchmark
 
@@ -1566,6 +1616,12 @@ outputs\pipeline_validation_v1
 ```
 
 存放 Pipeline v1 的 synthetic tests、三类真实 E2E、统一 schema、cache、retrieval regression、hard checks 和分阶段 latency；不提交 Git。
+
+```text
+outputs\demo_validation_v1
+```
+
+存放 Streamlit startup、strong/unsupported 展示 contract、display sanitization 和本地 server log；不提交 Git。
 
 ## 15. 运行命令
 
@@ -2020,7 +2076,27 @@ C:\Users\18449\Desktop\researchguard_workspace\outputs\citation_audit_validation
 
 输出目录：`outputs/pipeline_validation_v1`。
 
-### 15.19 Compile check
+### 15.19 Streamlit Demo 和 validation
+
+启动本地 Demo：
+
+```powershell
+& "C:\Users\18449\Desktop\researchguard_workspace\.venv\Scripts\python.exe" `
+  -m streamlit run `
+  "C:\Users\18449\Desktop\researchguard_workspace\demo\app.py"
+```
+
+运行 Demo v1 验证：
+
+```powershell
+& "C:\Users\18449\Desktop\researchguard_workspace\.venv\Scripts\python.exe" `
+  "C:\Users\18449\Desktop\researchguard_workspace\scripts\validate_demo_v1.py" `
+  --config "C:\Users\18449\Desktop\researchguard_workspace\configs\pipeline_v1.yaml"
+```
+
+输出目录：`outputs/demo_validation_v1`。
+
+### 15.20 Compile check
 
 ```powershell
 & "C:\Users\18449\Desktop\researchguard_workspace\.venv\Scripts\python.exe" `
@@ -2419,6 +2495,21 @@ Pipeline validation 结论：`PASS`。
 
 这些是本地 warm-cache E2E 数值，不代表 cold API、模型首次加载、并发服务或生产网络延迟。Pipeline v1 验证编排不变量，不替代各模块独立 benchmark，也不是 blind hold-out。
 
+### 16.13 Streamlit Demo v1
+
+Demo validation 结论：`PASS`。
+
+| Check | Result |
+| --- | ---: |
+| Streamlit startup | PASS |
+| Strong render contract | PASS |
+| Unsupported render contract | PASS |
+| Display sanitization | PASS |
+| Browser desktop 1440x900 | PASS |
+| Browser mobile 390x844 | PASS |
+
+Strong 真实案例返回 `final_status=grounded`、`support_level=strong`、10 条 evidence、370 字符 answer、1 条 answer citation 和 4 条 audited claims，六个 stage 均 completed。Unsupported 真实案例返回 `final_status=rejected`、`support_level=unsupported`、固定拒答、0 citation、0 claim，Answer Generation 与 Citation Audit 均 skipped。Demo 没有修改 benchmark，也没有形成独立模型质量指标；它验证的是页面启动、Pipeline 接入和展示 contract。
+
 ## 17. 已知限制
 
 - OCR fallback 尚未接入当前 parser v5 主流程。
@@ -2471,6 +2562,10 @@ Pipeline validation 结论：`PASS`。
 - Pipeline 的 Rewrite/Retrieval/Reranker 由同一次 `RetrievalEngine.retrieve` 执行；分段 latency 精确记录，但三个 stage 的 wall-clock start/end 不是独立执行窗口。
 - `include_retrieval_text=true` 会在统一 JSON 中保留完整 Top-k 文本，便于审阅但会增大输出；对外服务化前需要明确数据最小化和访问控制。
 - Pipeline 只保证调用顺序、gate、provenance 和 fail-closed 状态，不提高任何单模块的准确率，也不能证明 corpus 完整、论文结论真实或最终系统可安全用于生产。
+- Streamlit Demo v1 只面向本地单用户展示；没有用户系统、鉴权、速率限制、并发任务队列、取消/恢复、在线部署、HTTPS、审计日志或 API SLA。
+- Demo 使用进程内 `st.cache_resource` 复用 Pipeline 实例；这降低重复模型加载开销，但不是多进程或多租户资源管理方案。
+- Evidence 文本可能保留 PDF parser 的历史乱码；Demo 如实展示当前 chunk，不在 UI 层修正 source text。
+- Debug JSON 已脱敏本地路径和 secret-like 字符串，但正式对外部署前仍需更严格的数据分级、内容访问控制和安全审查。
 - Retrieval benchmark 目前只有五篇论文、40 条人工可核对 query；它适合当前回归验证，不代表大规模真实科研检索质量。
 - Dense retrieval 依赖 OpenAI query embedding 和 `OPENAI_API_KEY`；sparse BM25 可离线运行。
 - Agentic RAG 仍是 legacy 模块，尚未围绕新 chunks 重构。
@@ -2479,9 +2574,9 @@ Pipeline validation 结论：`PASS`。
 
 ## 18. 下一步计划
 
-当前 Retrieval、Chroma、Reranker、Query Rewrite、Evidence Sufficiency、Answer Generation、Citation Audit 和 Pipeline Integration v1 均已通过独立验证。后续若进入 Agentic RAG，必须把当前 gate 和 audit 作为不可绕过的边界，而不是让 Agent 用重试掩盖 unsupported claims。
+当前 Retrieval、Chroma、Reranker、Query Rewrite、Evidence Sufficiency、Answer Generation、Citation Audit、Pipeline Integration 和 Streamlit Demo v1 均已通过独立验证。后续若进入 Agentic RAG，必须把当前 gate 和 audit 作为不可绕过的边界，而不是让 Agent 用重试掩盖 unsupported claims。
 
-1. 冻结 Pipeline v1 schema/config、stage status、gate 语义和三类 E2E regression outputs。
+1. 冻结 Pipeline v1 schema/config、Demo display contract、stage status、gate 语义和 E2E regression outputs。
 2. 建立独立 blind hold-out，增加中文、长答案、复杂数字/表格/公式、否定、跨论文冲突和 citation redundancy 标注。
 3. 为 claim 保存 answer span offsets，减少 paraphrase 后人工定位困难，并评估 extractor 的 claim completeness，而不只评估已匹配 claims。
 4. 单独评估 citation necessity/minimality、跨多个 chunks 的联合 entailment 和冲突 evidence，不能用 provenance validity 代替。
