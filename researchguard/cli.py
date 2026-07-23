@@ -118,6 +118,72 @@ def cmd_run(args: argparse.Namespace) -> None:
         print(rendered)
 
 
+def _load_json_file(path: str | None) -> object | None:
+    if not path:
+        return None
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def cmd_agent_run(args: argparse.Namespace) -> None:
+    from researchguard.agent import AgentPolicy, BoundedResearchAgentController
+    from researchguard.tools import build_default_registry
+
+    answer_artifact = _load_json_file(args.answer_json)
+    if answer_artifact is not None and not isinstance(answer_artifact, dict):
+        raise ValueError("--answer-json must contain a JSON object.")
+
+    evidence_value = _load_json_file(args.evidence_json)
+    if isinstance(evidence_value, dict):
+        evidence_value = evidence_value.get("evidence")
+    if evidence_value is not None and not isinstance(evidence_value, list):
+        raise ValueError("--evidence-json must contain a JSON list or an object with an evidence list.")
+
+    policy = AgentPolicy(
+        max_steps=args.max_steps,
+        max_tool_calls=args.max_tool_calls,
+        max_retry=args.max_retry,
+        timeout=args.timeout,
+    )
+    registry = build_default_registry(args.config)
+    controller = BoundedResearchAgentController(
+        registry=registry,
+        policy=policy,
+        config_path=args.config,
+    )
+    state = controller.run(
+        args.query,
+        task_type=args.task_type,
+        answer_artifact=answer_artifact,
+        evidence=evidence_value,
+    )
+    report = {
+        "Agent Plan": state.plan,
+        "Tool Calls": state.tool_history,
+        "Observations": state.observations,
+        "Final Status": {
+            "status": state.status,
+            "reason": state.reason,
+            "current_step": state.current_step,
+            "run_id": state.run_id,
+        },
+        "Answer": state.answer,
+        "Citation": state.audit_result,
+    }
+    rendered = json.dumps(report, ensure_ascii=False, indent=2)
+    if args.output:
+        output_path = Path(args.output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(rendered + "\n", encoding="utf-8")
+        print(f"Agent result: {output_path}")
+    else:
+        print(rendered)
+    if args.state_output:
+        state_path = state.save(args.state_output)
+        print(f"Agent state: {state_path}")
+    if state.status == "failed":
+        raise SystemExit(1)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="researchguard",
@@ -140,6 +206,37 @@ def main() -> None:
     run_parser.add_argument("--config", default=DEFAULT_PIPELINE_CONFIG, help="Pipeline YAML config path.")
     run_parser.add_argument("--output", help="Optional JSON output path.")
     run_parser.set_defaults(func=cmd_run)
+
+    agent_parser = subparsers.add_parser(
+        "agent-run",
+        help="Run the bounded ResearchGuard single-agent controller.",
+    )
+    agent_parser.add_argument("--query", required=True, help="Research question or audit instruction.")
+    agent_parser.add_argument(
+        "--task-type",
+        choices=("qa", "comparison", "audit"),
+        help="Optional task type override; otherwise inferred deterministically.",
+    )
+    agent_parser.add_argument(
+        "--config",
+        default=DEFAULT_PIPELINE_CONFIG,
+        help="Pipeline YAML config used by the registered tools.",
+    )
+    agent_parser.add_argument(
+        "--answer-json",
+        help="Provenance-bearing answer artifact required for an explicit audit task.",
+    )
+    agent_parser.add_argument(
+        "--evidence-json",
+        help="Optional canonical evidence JSON for an audit task.",
+    )
+    agent_parser.add_argument("--output", help="Optional agent report JSON path.")
+    agent_parser.add_argument("--state-output", help="Optional resumable agent state JSON path.")
+    agent_parser.add_argument("--max-steps", type=int, default=6)
+    agent_parser.add_argument("--max-tool-calls", type=int, default=10)
+    agent_parser.add_argument("--max-retry", type=int, default=2)
+    agent_parser.add_argument("--timeout", type=float, default=120.0)
+    agent_parser.set_defaults(func=cmd_agent_run)
 
     args = parser.parse_args()
 

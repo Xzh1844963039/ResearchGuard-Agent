@@ -1,0 +1,295 @@
+# C:\Users\18449\Desktop\researchguard_workspace\researchguard\agent\controller.py
+from __future__ import annotations
+
+import copy
+import time
+from pathlib import Path
+from typing import Any, Iterable, Mapping
+
+from researchguard.agent.planner import BoundedPlanner, PlannerError
+from researchguard.agent.policy import AgentPolicy
+from researchguard.agent.state import ResearchAgentState, utc_timestamp
+from researchguard.tools import (
+    EvidenceRecord,
+    ToolError,
+    ToolRegistry,
+    ToolResult,
+    build_default_registry,
+)
+
+
+class BoundedResearchAgentController:
+    def __init__(
+        self,
+        *,
+        registry: ToolRegistry | None = None,
+        planner: Any | None = None,
+        policy: AgentPolicy | None = None,
+        config_path: str | Path = "configs/pipeline_v1.yaml",
+    ):
+        self.policy = policy or AgentPolicy()
+        self.registry = registry or build_default_registry(config_path)
+        self.planner = planner or BoundedPlanner(
+            self.registry,
+            max_steps=self.policy.max_steps,
+        )
+
+    def run(
+        self,
+        query: str,
+        *,
+        task_type: str | None = None,
+        answer_artifact: Mapping[str, Any] | None = None,
+        evidence: Iterable[EvidenceRecord | Mapping[str, Any]] | None = None,
+    ) -> ResearchAgentState:
+        state = ResearchAgentState(
+            query=query,
+            answer=copy.deepcopy(dict(answer_artifact)) if answer_artifact is not None else None,
+            evidence=self._serialize_evidence(evidence or ()),
+        )
+        try:
+            plan = self.planner.create_plan(
+                state.query,
+                task_type=task_type,
+                has_evidence=bool(state.evidence),
+                has_answer=state.answer is not None,
+            )
+        except (PlannerError, ValueError, TypeError) as exc:
+            state.set_status("failed", f"planner_error: {exc}")
+            return state
+
+        state.task_type = plan.task_type
+        state.plan = [step.to_dict() for step in plan.steps]
+        state.set_status("planned")
+        plan_error = self.policy.validate_plan(state)
+        if plan_error:
+            state.set_status("failed", plan_error)
+            return state
+        return self.execute(state)
+
+    def resume(self, state: ResearchAgentState) -> ResearchAgentState:
+        if state.status in {"completed", "rejected", "failed"}:
+            return state
+        if not state.plan:
+            state.set_status("failed", "missing_plan")
+            return state
+        plan_error = self.policy.validate_plan(state)
+        if plan_error:
+            state.set_status("failed", plan_error)
+            return state
+        return self.execute(state)
+
+    def execute(self, state: ResearchAgentState) -> ResearchAgentState:
+        started = time.perf_counter()
+        state.set_status("running")
+
+        while state.current_step < len(state.plan):
+            stop_reason = self.policy.stop_reason(
+                state,
+                elapsed_seconds=time.perf_counter() - started,
+            )
+            if stop_reason:
+                state.set_status("failed", stop_reason)
+                return state
+
+            step = state.plan[state.current_step]
+            tool_name = str(step.get("tool", ""))
+            if tool_name not in self.registry.names:
+                state.set_status("failed", f"unregistered_tool: {tool_name or 'missing'}")
+                return state
+
+            try:
+                tool_input = self._build_tool_input(tool_name, state)
+            except (ValueError, TypeError) as exc:
+                state.set_status("failed", f"invalid_tool_input: {exc}")
+                return state
+
+            try:
+                result = self.registry.invoke(tool_name, **tool_input)
+            except Exception as exc:
+                result = ToolResult.create(
+                    status="failed",
+                    message="Registered tool raised an unhandled exception.",
+                    reason="unhandled_tool_exception",
+                    tool_name=tool_name,
+                    tool_version=self.registry.version,
+                    latency_ms=0.0,
+                    error=ToolError(
+                        code="unhandled_tool_exception",
+                        category="execution_failure",
+                        message=str(exc),
+                        retryable=False,
+                        details={"exception_type": type(exc).__name__},
+                    ),
+                )
+            self._record_tool_result(state, tool_name, tool_input, result)
+            self._apply_result(state, tool_name, result)
+
+            if time.perf_counter() - started >= self.policy.timeout:
+                state.set_status("failed", "timeout_exceeded")
+                return state
+
+            if result.status == "failed":
+                retry_key = str(state.current_step)
+                retry_count = state.retry_counts.get(retry_key, 0)
+                retryable = bool(result.error and result.error.retryable)
+                if retryable and self.policy.can_retry(retry_count):
+                    state.retry_counts[retry_key] = retry_count + 1
+                    state.touch()
+                    continue
+                state.set_status("failed", "tool_error")
+                return state
+
+            if result.status == "rejected":
+                reason = self._rejection_reason(tool_name, result)
+                state.set_status("rejected", reason)
+                return state
+
+            state.retry_counts.pop(str(state.current_step), None)
+            state.current_step += 1
+            state.touch()
+
+        state.set_status("completed")
+        return state
+
+    def _build_tool_input(
+        self,
+        tool_name: str,
+        state: ResearchAgentState,
+    ) -> dict[str, Any]:
+        if tool_name == "retrieve_evidence":
+            return {"query": state.query}
+        if tool_name == "assess_evidence":
+            if not state.evidence:
+                raise ValueError("assess_evidence requires retrieved evidence.")
+            return {"query": state.query, "evidence": state.evidence}
+        if tool_name == "generate_grounded_answer":
+            return {"query": state.query}
+        if tool_name == "audit_answer":
+            if state.answer is None:
+                raise ValueError("audit_answer requires a provenance-bearing answer artifact.")
+            if not state.evidence:
+                raise ValueError("audit_answer requires canonical evidence.")
+            return {"answer": state.answer, "evidence": state.evidence}
+        raise ValueError(f"No input adapter exists for tool: {tool_name}")
+
+    def _apply_result(
+        self,
+        state: ResearchAgentState,
+        tool_name: str,
+        result: ToolResult,
+    ) -> None:
+        data = result.data
+        if tool_name == "retrieve_evidence":
+            evidence = data.get("evidence", [])
+            if isinstance(evidence, list):
+                state.evidence = self._serialize_evidence(evidence)
+        elif tool_name == "generate_grounded_answer":
+            pipeline_result = data.get("pipeline_result", {})
+            if isinstance(pipeline_result, Mapping):
+                answer_stage = pipeline_result.get("answer_generation", {})
+                audit_stage = pipeline_result.get("citation_audit", {})
+                retrieval_stage = pipeline_result.get("retrieval", {})
+                answer_output = (
+                    answer_stage.get("output") if isinstance(answer_stage, Mapping) else None
+                )
+                audit_output = audit_stage.get("output") if isinstance(audit_stage, Mapping) else None
+                retrieval_output = (
+                    retrieval_stage.get("output") if isinstance(retrieval_stage, Mapping) else None
+                )
+                if isinstance(answer_output, Mapping):
+                    state.answer = copy.deepcopy(dict(answer_output))
+                if isinstance(audit_output, Mapping):
+                    state.audit_result = copy.deepcopy(dict(audit_output))
+                if isinstance(retrieval_output, Mapping):
+                    hits = retrieval_output.get("hits", [])
+                    if isinstance(hits, list) and hits:
+                        state.evidence = self._serialize_evidence(hits)
+        elif tool_name == "audit_answer":
+            audit = data.get("audit")
+            if isinstance(audit, Mapping):
+                state.audit_result = copy.deepcopy(dict(audit))
+        state.touch()
+
+    def _record_tool_result(
+        self,
+        state: ResearchAgentState,
+        tool_name: str,
+        tool_input: Mapping[str, Any],
+        result: ToolResult,
+    ) -> None:
+        state.tool_history.append(
+            {
+                "tool_name": tool_name,
+                "input_summary": self._input_summary(tool_input),
+                "output_status": result.status,
+                "latency_ms": result.latency_ms,
+                "timestamp": result.timestamp,
+                "trace_id": result.trace_id,
+            }
+        )
+        state.observations.append(
+            {
+                "tool_name": tool_name,
+                "status": result.status,
+                "message": result.message,
+                "reason": result.reason,
+                "trace_id": result.trace_id,
+                "data": copy.deepcopy(dict(result.data)),
+                "error": result.error.to_dict() if result.error else None,
+            }
+        )
+        state.touch()
+
+    @staticmethod
+    def _input_summary(tool_input: Mapping[str, Any]) -> dict[str, Any]:
+        summary: dict[str, Any] = {}
+        query = tool_input.get("query")
+        if query is not None:
+            text = str(query)
+            summary["query_preview"] = text[:120]
+            summary["query_length"] = len(text)
+        evidence = tool_input.get("evidence")
+        if isinstance(evidence, list):
+            summary["evidence_count"] = len(evidence)
+            summary["evidence_chunk_ids"] = [
+                str(item.get("chunk_id"))
+                for item in evidence
+                if isinstance(item, Mapping) and item.get("chunk_id")
+            ]
+        answer = tool_input.get("answer")
+        if isinstance(answer, Mapping):
+            summary["answer_length"] = len(str(answer.get("answer", "")))
+            citations = answer.get("citations", [])
+            summary["citation_count"] = len(citations) if isinstance(citations, list) else 0
+        return summary
+
+    @staticmethod
+    def _serialize_evidence(
+        evidence: Iterable[EvidenceRecord | Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        serialized: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in evidence:
+            record = item if isinstance(item, EvidenceRecord) else EvidenceRecord.from_mapping(item)
+            if record.chunk_id in seen:
+                continue
+            seen.add(record.chunk_id)
+            serialized.append(record.to_dict())
+        return serialized
+
+    @staticmethod
+    def _rejection_reason(tool_name: str, result: ToolResult) -> str:
+        if tool_name == "assess_evidence":
+            return "insufficient_evidence"
+        if tool_name == "generate_grounded_answer":
+            pipeline_result = result.data.get("pipeline_result", {})
+            final_status = (
+                pipeline_result.get("final_status")
+                if isinstance(pipeline_result, Mapping)
+                else None
+            )
+            return "insufficient_evidence" if final_status == "rejected" else "answer_not_grounded"
+        if tool_name == "audit_answer":
+            return "answer_not_grounded"
+        return result.reason or "tool_rejected"

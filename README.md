@@ -6,7 +6,7 @@
 
 ResearchGuard 是一个面向科研论文的多文档 RAG 工程。它不止返回与问题相似的段落，而是把版面解析、section-aware chunking、混合检索、Cross-Encoder 精排、查询改写、证据充分性判断、受证据约束的回答生成和逐 claim 引用核验串成一条可审计流程。
 
-当前主流程已经完成本地集成与验证；历史 Agent、Memory 和早期 Audit 代码仍保留用于兼容和后续重构，但不属于 v1 统一 Pipeline 的运行路径。
+当前 Evidence Engine 主流程已经完成本地集成与验证；v2 在其上增加了 Tool Facade 和受约束的单 Agent Controller。历史 Agent、Memory 和早期 Audit 代码仍保留用于兼容，但不属于当前 Controller 的运行路径。
 
 ## Architecture
 
@@ -30,11 +30,15 @@ flowchart LR
 
 ## Agent-ready Architecture
 
-ResearchGuard v2 当前完成的是 **Phase 0 + Phase 1：Evidence Engine Contract + Agent Tool Facade**。这一层不改变既有 Parser、Chunking、Indexing、Retrieval 或统一 Pipeline 的核心逻辑，而是为未来 Agent Controller 提供稳定、可审计的调用边界。
+ResearchGuard v2 已完成 **Phase 0 + Phase 1：Evidence Engine Contract + Agent Tool Facade**，并在此基础上完成 **Phase 2：Bounded Single-Agent Controller v1**。这些新增层不改变既有 Parser、Chunking、Indexing、Retrieval 或统一 Pipeline 的核心逻辑。
 
 ```mermaid
 flowchart TD
-    Controller["Future Agent Controller<br/>(not implemented)"] --> Registry["Tool Registry"]
+    Query["User Query"] --> Planner["Bounded Planner"]
+    Planner --> Controller["Single-Agent Controller"]
+    Policy["Step / Call / Retry / Timeout Policy"] --> Controller
+    State["Serializable Agent State"] <--> Controller
+    Controller --> Registry["Tool Registry"]
     Registry --> RetrievalTool["retrieve_evidence"]
     Registry --> EvidenceTool["assess_evidence"]
     Registry --> AnswerTool["generate_grounded_answer"]
@@ -62,9 +66,31 @@ Tool Facade 位于 `researchguard/tools/`：
 | `generate_grounded_answer` | `ResearchGuardPipeline` | 不暴露裸 `generate_answer`；必须经过 Evidence Gate、Answer Generation 与 Citation Audit |
 | `audit_answer` | Citation Audit | 只接受完整 `AnswerGenerationResult` 或其序列化 artifact，拒绝缺少引用 provenance 的裸答案字符串 |
 
-`researchguard/tools/registry.py` 提供可枚举、可注册、可统一调用的 Tool Registry。默认 Registry 仅包含上述四个受控接口，依赖在首次调用时加载。当前**尚未实现** Planner、ReAct loop、Memory、Multi-Agent、LangGraph 或 autonomous workflow；历史 `researchguard/agent/` 与 `researchguard/memory/` 也尚未接入该工具层。
+`researchguard/tools/registry.py` 提供可枚举、可注册、可统一调用的 Tool Registry。默认 Registry 仅包含上述四个受控接口，依赖在首次调用时加载。Phase 2 Controller 只能通过该 Registry 调用 Evidence Engine，不直接 import Retrieval、Answer Generator 或 Citation Audit 的内部实现。
 
 对应 synthetic tests 位于 `tests/tools/`，覆盖 schema/JSON 序列化、canonical provenance 往返、重复注册与未知工具错误、裸答案审计拒绝，以及 unsupported/partial evidence 无法触发 Answer Generator。
+
+## Bounded Single-Agent Controller
+
+Phase 2 位于 `researchguard/agent/`：
+
+- `state.py`：定义带 schema version 的 `ResearchAgentState`，记录 query、task type、plan、current step、tool trace、observations、evidence、answer、audit result 和状态时间；支持 JSON 保存与恢复。
+- `planner.py`：使用确定性规则生成 structured plan，仅支持 `qa`、`comparison` 和带完整 answer artifact 的 `audit`，不会生成 Registry 之外的工具。
+- `policy.py`：默认限制为 `max_steps=6`、`max_tool_calls=10`、`max_retry=2`、`timeout=120s`。
+- `controller.py`：执行 `plan → registry tool → observation → state update → stop decision`；Tool failure、Evidence 不足和 policy 超限均会终止。
+
+`qa` 和 `comparison` 的固定有限流程为：
+
+```text
+retrieve_evidence
+→ assess_evidence
+→ generate_grounded_answer
+→ audit_answer
+```
+
+如果 `assess_evidence` 返回 partial 或 unsupported，Controller 立即设置 `status="rejected"`，不会调用 Answer Tool。`audit` 任务要求调用方提供带 citation provenance 的 answer artifact；如果没有现成 evidence，可以先执行一次 retrieval。
+
+每次 Tool 调用都会记录 `tool_name`、输入摘要、输出状态、latency、timestamp 和 trace ID。当前 Planner 不调用 LLM，不做动态反思或开放式工具探索；项目也没有 Multi-Agent、Memory、LangGraph、autonomous browsing 或无限 ReAct loop。
 
 ## Key Features
 
@@ -75,6 +101,7 @@ Tool Facade 位于 `researchguard/tools/`：
 - **Evidence gate**：在生成前判定 `strong`、`partial` 或 `unsupported`；非 strong 证据不会进入回答生成。
 - **Grounded generation**：生成器只能使用 gate 选定的 evidence，并输出可回溯 citation。
 - **Citation audit**：将答案拆为 atomic claims，逐条核验支持程度和 citation provenance。
+- **Bounded single agent**：确定性有限计划、Registry-only tool calling、可恢复 state 与 step/call/retry/timeout 约束。
 - **Streamlit demo**：展示阶段状态、证据、证据充分性、回答、claim audit 和调试 JSON。
 
 ## Project Structure
@@ -84,9 +111,10 @@ researchguard/
   ingestion/       PDF layout、block、heading、section 与 chunking
   indexing/        embedding、BM25、NumPy/Chroma index 与 metadata
   retrieval/       retrieval、rewrite、rerank、evidence、answer 与 citation audit
+  tools/           Evidence contracts、Tool Facade 与 Registry
   pipeline.py      v1 统一 Pipeline
   cli.py           命令行入口
-  agent/           历史 Agent 实现，当前主流程未接入
+  agent/           Bounded Planner、Policy、State、Controller 与历史兼容代码
   audit/           历史规则式 audit，当前 claim audit 位于 retrieval/
   memory/          历史 memory 抽象，当前主流程未接入
 configs/           各阶段 YAML 配置
@@ -145,6 +173,15 @@ python -m researchguard.cli run `
   --query "What is the difference between RAG-Sequence and RAG-Token?" `
   --output outputs/pipeline_result.json
 ```
+
+运行受约束的单 Agent Controller：
+
+```powershell
+python -m researchguard.cli agent-run `
+  --query "Compare CRAG and Self-RAG"
+```
+
+可使用 `--task-type qa|comparison|audit` 覆盖确定性任务分类，并用 `--max-steps`、`--max-tool-calls`、`--max-retry` 和 `--timeout` 收紧 policy。`audit` 任务必须通过 `--answer-json` 提供完整 answer artifact；可通过 `--evidence-json` 提供 canonical evidence。`--output` 保存展示报告，`--state-output` 保存可恢复的完整 Agent state。
 
 启动 Demo：
 
@@ -210,9 +247,11 @@ Parser v5 已通过 reading order、heading、block-level section 和 references
 
 ## Limitations
 
-- Agent-ready Tool Facade 只是稳定调用边界，不是 Agent Controller；当前没有任务规划、工具选择循环、长期记忆或自治研究工作流。
-- `generate_grounded_answer` 复用完整统一 Pipeline，因此会自行完成检索到审计的全流程；当前还没有供 Controller 管理的跨 Tool session/context。
+- 当前 Planner 是确定性有限 Planner，不进行 LLM task decomposition、动态 re-planning 或开放式工具选择。
+- `generate_grounded_answer` 复用完整统一 Pipeline，因此会自行完成检索到审计的全流程；Controller 的显式 `audit_answer` 步骤使用该 Tool 输出中的同源 answer artifact 与 generation evidence，当前会形成一次可缓存的重复审计。
 - 独立 `audit_answer` 要求带 citation 与 generation evidence IDs 的完整 answer artifact，不能用来审计无 provenance 的任意文本。
+- Controller 的 wall-clock timeout 会在同步 Tool 返回后立即生效，但不能抢占正在执行的同步 Tool；底层 API 调用仍依赖各 Tool 自身 timeout。
+- 当前没有长期 Memory、跨任务 session、Multi-Agent、autonomous browsing、无限 reflection 或 autonomous workflow。
 
 - OCR fallback 尚未接入当前 Parser 主流程；扫描件质量依赖原始 PDF 文本层。
 - 复杂跨栏表格和视觉结构仍有限；caption/table/equation 主要按同 section、同页、y 距离和文档顺序绑定，不是完整视觉语义理解。
@@ -230,7 +269,7 @@ Parser v5 已通过 reading order、heading、block-level section 和 references
 2. 在独立 hold-out corpus 上扩充 retrieval、answerability 和 citation audit 评测。
 3. 校准 Evidence Sufficiency，降低 false negatives，同时保持 fail-closed 行为。
 4. 将本地绝对路径迁移为可移植配置，并补充数据准备 manifest。
-5. 重构历史 Agent/Memory 模块，使 agent action 不能绕过 evidence gate 与 citation audit。
+5. 在独立 Agent benchmark 上评估 task classification、tool trace、policy stop 和失败恢复，再决定是否引入受约束的短期 session context。
 6. 增加稳定 API、并发隔离、可观测性与部署方案。
 
 ## Development Documentation Rule
