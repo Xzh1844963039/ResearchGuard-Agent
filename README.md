@@ -28,6 +28,44 @@ flowchart LR
 
 统一入口是 `researchguard.pipeline.ResearchGuardPipeline`。Pipeline 复用各阶段实现，不在 CLI 或 Demo 中复制检索、判断、生成或审计逻辑。
 
+## Agent-ready Architecture
+
+ResearchGuard v2 当前完成的是 **Phase 0 + Phase 1：Evidence Engine Contract + Agent Tool Facade**。这一层不改变既有 Parser、Chunking、Indexing、Retrieval 或统一 Pipeline 的核心逻辑，而是为未来 Agent Controller 提供稳定、可审计的调用边界。
+
+```mermaid
+flowchart TD
+    Controller["Future Agent Controller<br/>(not implemented)"] --> Registry["Tool Registry"]
+    Registry --> RetrievalTool["retrieve_evidence"]
+    Registry --> EvidenceTool["assess_evidence"]
+    Registry --> AnswerTool["generate_grounded_answer"]
+    Registry --> AuditTool["audit_answer"]
+    RetrievalTool --> Core["ResearchGuard Core"]
+    EvidenceTool --> Core
+    AnswerTool --> Pipeline["Frozen Unified Pipeline"]
+    AuditTool --> Core
+    Pipeline --> Core
+```
+
+当前新增的统一契约位于 `researchguard/tools/contracts.py`：
+
+- `ToolResult`：统一记录 `status`、`message/reason`、UTC timestamp、latency、tool name/version、trace ID、data 与结构化 error。
+- `EvidenceRecord`：保留 canonical `chunk_id`、`doc_id`、`section`、`page`、content、source、score 与完整 provenance，不引入其他证据 ID 替代现有 chunk ID。
+- `ToolError`：统一表达 invalid input、API failure、timeout、retrieval failure 与 execution failure。
+- 所有契约带 schema version，并可直接序列化为 JSON。
+
+Tool Facade 位于 `researchguard/tools/`：
+
+| Tool | 包装的既有能力 | 安全边界 |
+|---|---|---|
+| `retrieve_evidence` | Query Rewrite、Hybrid Retrieval、Chroma、Reranker | 不复制召回或排序逻辑，输出 canonical evidence 与 ranking provenance |
+| `assess_evidence` | Evidence Sufficiency | 保持 `strong` / `partial` / `unsupported`，fallback 时 fail closed |
+| `generate_grounded_answer` | `ResearchGuardPipeline` | 不暴露裸 `generate_answer`；必须经过 Evidence Gate、Answer Generation 与 Citation Audit |
+| `audit_answer` | Citation Audit | 只接受完整 `AnswerGenerationResult` 或其序列化 artifact，拒绝缺少引用 provenance 的裸答案字符串 |
+
+`researchguard/tools/registry.py` 提供可枚举、可注册、可统一调用的 Tool Registry。默认 Registry 仅包含上述四个受控接口，依赖在首次调用时加载。当前**尚未实现** Planner、ReAct loop、Memory、Multi-Agent、LangGraph 或 autonomous workflow；历史 `researchguard/agent/` 与 `researchguard/memory/` 也尚未接入该工具层。
+
+对应 synthetic tests 位于 `tests/tools/`，覆盖 schema/JSON 序列化、canonical provenance 往返、重复注册与未知工具错误、裸答案审计拒绝，以及 unsupported/partial evidence 无法触发 Answer Generator。
+
 ## Key Features
 
 - **Layout-aware parsing**：使用 PyMuPDF 提取 span、字体与 bbox，恢复单双栏阅读顺序，识别 heading、paragraph、caption、table、equation 和 reference entry。
@@ -171,6 +209,10 @@ Parser v5 已通过 reading order、heading、block-level section 和 references
 - **阶段输出保留 provenance**：chunk、document、section、page、query variant 和 stage metadata 可追踪。
 
 ## Limitations
+
+- Agent-ready Tool Facade 只是稳定调用边界，不是 Agent Controller；当前没有任务规划、工具选择循环、长期记忆或自治研究工作流。
+- `generate_grounded_answer` 复用完整统一 Pipeline，因此会自行完成检索到审计的全流程；当前还没有供 Controller 管理的跨 Tool session/context。
+- 独立 `audit_answer` 要求带 citation 与 generation evidence IDs 的完整 answer artifact，不能用来审计无 provenance 的任意文本。
 
 - OCR fallback 尚未接入当前 Parser 主流程；扫描件质量依赖原始 PDF 文本层。
 - 复杂跨栏表格和视觉结构仍有限；caption/table/equation 主要按同 section、同页、y 距离和文档顺序绑定，不是完整视觉语义理解。
