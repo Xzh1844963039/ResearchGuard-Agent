@@ -11,6 +11,7 @@ from researchguard.agent.policy import AgentPolicy
 from researchguard.agent.state import ResearchAgentState, utc_timestamp
 from researchguard.tools import (
     EvidenceRecord,
+    ScholarPaperRecord,
     ToolError,
     ToolRegistry,
     ToolResult,
@@ -123,7 +124,15 @@ class BoundedResearchAgentController:
                     ),
                 )
             self._record_tool_result(state, tool_name, tool_input, result)
-            self._apply_result(state, tool_name, result)
+            try:
+                self._apply_result(state, tool_name, result)
+            except (TypeError, ValueError) as exc:
+                state.observations[-1]["output_validation_error"] = {
+                    "exception_type": type(exc).__name__,
+                    "message": str(exc),
+                }
+                state.set_status("failed", "invalid_tool_output")
+                return state
 
             if time.perf_counter() - started >= self.policy.timeout:
                 state.set_status("failed", "timeout_exceeded")
@@ -159,6 +168,8 @@ class BoundedResearchAgentController:
     ) -> dict[str, Any]:
         if tool_name == "retrieve_evidence":
             return {"query": state.query}
+        if tool_name == "search_scholarly_sources":
+            return {"query": state.query}
         if tool_name == "assess_evidence":
             if not state.evidence:
                 raise ValueError("assess_evidence requires retrieved evidence.")
@@ -184,6 +195,12 @@ class BoundedResearchAgentController:
             evidence = data.get("evidence", [])
             if isinstance(evidence, list):
                 state.evidence = self._serialize_evidence(evidence)
+        elif tool_name == "search_scholarly_sources":
+            candidate_papers = data.get("candidate_papers", [])
+            if isinstance(candidate_papers, list):
+                state.candidate_papers = self._serialize_candidate_papers(candidate_papers)
+            else:
+                raise TypeError("candidate_papers must be a list.")
         elif tool_name == "generate_grounded_answer":
             pipeline_result = data.get("pipeline_result", {})
             if isinstance(pipeline_result, Mapping):
@@ -275,6 +292,24 @@ class BoundedResearchAgentController:
             if record.chunk_id in seen:
                 continue
             seen.add(record.chunk_id)
+            serialized.append(record.to_dict())
+        return serialized
+
+    @staticmethod
+    def _serialize_candidate_papers(
+        candidate_papers: Iterable[ScholarPaperRecord | Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        serialized: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in candidate_papers:
+            record = (
+                item
+                if isinstance(item, ScholarPaperRecord)
+                else ScholarPaperRecord.from_dict(item)
+            )
+            if record.paper_id in seen:
+                continue
+            seen.add(record.paper_id)
             serialized.append(record.to_dict())
         return serialized
 

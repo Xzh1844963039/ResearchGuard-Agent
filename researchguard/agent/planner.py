@@ -10,13 +10,18 @@ from researchguard.tools import ToolRegistry
 
 
 PLAN_SCHEMA_VERSION = "researchguard.agent_plan.v1"
-SUPPORTED_TASK_TYPES = ("qa", "comparison", "audit")
+SUPPORTED_TASK_TYPES = ("qa", "comparison", "audit", "literature_search")
 COMPARISON_RE = re.compile(
     r"\b(compare|comparison|contrast|difference|different|versus|vs\.?|distinguish)\b",
     re.IGNORECASE,
 )
 AUDIT_RE = re.compile(
     r"\b(audit|verify|validate|check)\b.{0,32}\b(citation|claim|answer|response)\b",
+    re.IGNORECASE,
+)
+LITERATURE_SEARCH_RE = re.compile(
+    r"\b(find|search|discover|identify|locate|recommend)\b.{0,48}"
+    r"\b(papers?|literature|articles?|publications?|preprints?)\b",
     re.IGNORECASE,
 )
 
@@ -63,6 +68,7 @@ class BoundedPlanner:
         "assess_evidence": "Check whether the retrieved evidence is sufficient.",
         "generate_grounded_answer": "Generate only through the guarded evidence pipeline.",
         "audit_answer": "Verify answer claims and citation provenance.",
+        "search_scholarly_sources": "Discover external candidate paper metadata.",
     }
 
     def __init__(self, registry: ToolRegistry, *, max_steps: int = 6):
@@ -86,7 +92,9 @@ class BoundedPlanner:
         if selected_type not in SUPPORTED_TASK_TYPES:
             raise PlannerError(f"Unsupported task type: {selected_type}")
 
-        if selected_type == "audit":
+        if selected_type == "literature_search":
+            tool_names = ["search_scholarly_sources"]
+        elif selected_type == "audit":
             if not has_answer:
                 raise PlannerError("Audit tasks require a provenance-bearing answer artifact.")
             tool_names = ([] if has_evidence else ["retrieve_evidence"]) + ["audit_answer"]
@@ -125,6 +133,8 @@ class BoundedPlanner:
     def classify_task(query: str) -> str:
         if AUDIT_RE.search(query):
             return "audit"
+        if LITERATURE_SEARCH_RE.search(query):
+            return "literature_search"
         if COMPARISON_RE.search(query):
             return "comparison"
         return "qa"

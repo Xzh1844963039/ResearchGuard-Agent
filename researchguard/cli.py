@@ -160,6 +160,7 @@ def cmd_agent_run(args: argparse.Namespace) -> None:
         "Agent Plan": state.plan,
         "Tool Calls": state.tool_history,
         "Observations": state.observations,
+        "Candidate Papers": state.candidate_papers,
         "Final Status": {
             "status": state.status,
             "reason": state.reason,
@@ -214,7 +215,7 @@ def main() -> None:
     agent_parser.add_argument("--query", required=True, help="Research question or audit instruction.")
     agent_parser.add_argument(
         "--task-type",
-        choices=("qa", "comparison", "audit"),
+        choices=("qa", "comparison", "audit", "literature_search"),
         help="Optional task type override; otherwise inferred deterministically.",
     )
     agent_parser.add_argument(

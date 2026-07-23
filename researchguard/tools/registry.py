@@ -10,6 +10,7 @@ from researchguard.tools.audit_tool import CitationAuditTool
 from researchguard.tools.contracts import ToolError, ToolResult, ToolSpec
 from researchguard.tools.evidence_tool import EvidenceTool
 from researchguard.tools.retrieval_tool import RetrievalTool
+from researchguard.tools.scholarly_search_tool import ScholarlySearchTool
 
 
 class ToolRegistry:
@@ -72,4 +73,5 @@ def build_default_registry(
     registry.register(EvidenceTool(config_path=config_path))
     registry.register(GuardedAnswerTool(config_path=config_path))
     registry.register(CitationAuditTool(config_path=config_path))
+    registry.register(ScholarlySearchTool())
     return registry

@@ -43,10 +43,12 @@ flowchart TD
     Registry --> EvidenceTool["assess_evidence"]
     Registry --> AnswerTool["generate_grounded_answer"]
     Registry --> AuditTool["audit_answer"]
+    Registry --> ScholarTool["search_scholarly_sources"]
     RetrievalTool --> Core["ResearchGuard Core"]
     EvidenceTool --> Core
     AnswerTool --> Pipeline["Frozen Unified Pipeline"]
     AuditTool --> Core
+    ScholarTool --> Candidates["Candidate Paper Metadata"]
     Pipeline --> Core
 ```
 
@@ -65,8 +67,9 @@ Tool Facade 位于 `researchguard/tools/`：
 | `assess_evidence` | Evidence Sufficiency | 保持 `strong` / `partial` / `unsupported`，fallback 时 fail closed |
 | `generate_grounded_answer` | `ResearchGuardPipeline` | 不暴露裸 `generate_answer`；必须经过 Evidence Gate、Answer Generation 与 Citation Audit |
 | `audit_answer` | Citation Audit | 只接受完整 `AnswerGenerationResult` 或其序列化 artifact，拒绝缺少引用 provenance 的裸答案字符串 |
+| `search_scholarly_sources` | arXiv / OpenAlex metadata APIs | 只返回 `metadata_only=true` 的候选论文，不产生 EvidenceRecord |
 
-`researchguard/tools/registry.py` 提供可枚举、可注册、可统一调用的 Tool Registry。默认 Registry 仅包含上述四个受控接口，依赖在首次调用时加载。Phase 2 Controller 只能通过该 Registry 调用 Evidence Engine，不直接 import Retrieval、Answer Generator 或 Citation Audit 的内部实现。
+`researchguard/tools/registry.py` 提供可枚举、可注册、可统一调用的 Tool Registry。默认 Registry 包含上述五个受控接口，依赖在首次调用时加载。Phase 2 Controller 只能通过该 Registry 调用能力，不直接 import Retrieval、Answer Generator 或 Citation Audit 的内部实现。
 
 对应 synthetic tests 位于 `tests/tools/`，覆盖 schema/JSON 序列化、canonical provenance 往返、重复注册与未知工具错误、裸答案审计拒绝，以及 unsupported/partial evidence 无法触发 Answer Generator。
 
@@ -92,6 +95,40 @@ retrieve_evidence
 
 每次 Tool 调用都会记录 `tool_name`、输入摘要、输出状态、latency、timestamp 和 trace ID。当前 Planner 不调用 LLM，不做动态反思或开放式工具探索；项目也没有 Multi-Agent、Memory、LangGraph、autonomous browsing 或无限 ReAct loop。
 
+## Scholarly Discovery Tools
+
+Phase 3 增加了独立的 Scholar Discovery Layer，用于发现可能值得纳入语料库的外部论文：
+
+```text
+External Search
+→ Candidate Paper Metadata
+→ optional user selection / ingestion
+→ Parser
+→ Index
+→ ResearchGuard Retrieval
+→ Grounded Answer
+```
+
+当前 Provider：
+
+- **arXiv**：默认 Provider，调用公开 Atom API，无需 API key。
+- **OpenAlex**：提供 works metadata、venue、citation count 与 open-access metadata；当前官方 API 要求 key，使用环境变量 `OPENALEX_API_KEY`，且只有显式选择该 Provider 时才会调用。
+
+Provider abstraction 位于 `researchguard/tools/scholarly/`，统一实现 `search(query, limit)`。`search_scholarly_sources` 接受 query、可选 source preference 和 `1..50` 的 limit，按 DOI 或 title/year 去重，并返回统一 `ScholarPaperRecord`。每条记录包含 title、authors、year、venue、DOI、URL、abstract、source、paper ID、source type、provider metadata 和 retrieval timestamp。
+
+所有 `ScholarPaperRecord` 强制带有：
+
+```text
+metadata_only = true
+evidence_eligible = false
+```
+
+它们不是 `EvidenceRecord`，没有 canonical chunk ID、page、section 或 parser provenance，不能传给 Answer Tool。Planner 对 `literature_search` 只生成一个 `search_scholarly_sources` step；Controller 将结果保存到 `candidate_papers` 后结束，不会继续生成回答。
+
+搜索缓存位于 `data/cache/scholarly_search_v1/`，cache key 包含 query、provider、config version 和 limit；缓存只保存请求、metadata response 与 timestamp，并被 Git 忽略。
+
+**External Discovery ≠ Evidence Verification。** 外部 metadata 必须经过用户选择、PDF ingestion、Parser、Index 和 ResearchGuard Retrieval 后，才可能成为可引用证据。
+
 ## Key Features
 
 - **Layout-aware parsing**：使用 PyMuPDF 提取 span、字体与 bbox，恢复单双栏阅读顺序，识别 heading、paragraph、caption、table、equation 和 reference entry。
@@ -102,6 +139,7 @@ retrieve_evidence
 - **Grounded generation**：生成器只能使用 gate 选定的 evidence，并输出可回溯 citation。
 - **Citation audit**：将答案拆为 atomic claims，逐条核验支持程度和 citation provenance。
 - **Bounded single agent**：确定性有限计划、Registry-only tool calling、可恢复 state 与 step/call/retry/timeout 约束。
+- **Scholarly discovery**：通过可扩展 Provider 发现 arXiv/OpenAlex 候选论文，同时隔离 metadata 与 answer evidence。
 - **Streamlit demo**：展示阶段状态、证据、证据充分性、回答、claim audit 和调试 JSON。
 
 ## Project Structure
@@ -112,6 +150,7 @@ researchguard/
   indexing/        embedding、BM25、NumPy/Chroma index 与 metadata
   retrieval/       retrieval、rewrite、rerank、evidence、answer 与 citation audit
   tools/           Evidence contracts、Tool Facade 与 Registry
+    scholarly/     arXiv/OpenAlex Provider abstraction 与 metadata cache
   pipeline.py      v1 统一 Pipeline
   cli.py           命令行入口
   agent/           Bounded Planner、Policy、State、Controller 与历史兼容代码
@@ -181,7 +220,14 @@ python -m researchguard.cli agent-run `
   --query "Compare CRAG and Self-RAG"
 ```
 
-可使用 `--task-type qa|comparison|audit` 覆盖确定性任务分类，并用 `--max-steps`、`--max-tool-calls`、`--max-retry` 和 `--timeout` 收紧 policy。`audit` 任务必须通过 `--answer-json` 提供完整 answer artifact；可通过 `--evidence-json` 提供 canonical evidence。`--output` 保存展示报告，`--state-output` 保存可恢复的完整 Agent state。
+发现外部候选论文：
+
+```powershell
+python -m researchguard.cli agent-run `
+  --query "Find papers about corrective retrieval augmented generation"
+```
+
+可使用 `--task-type qa|comparison|audit|literature_search` 覆盖确定性任务分类，并用 `--max-steps`、`--max-tool-calls`、`--max-retry` 和 `--timeout` 收紧 policy。`audit` 任务必须通过 `--answer-json` 提供完整 answer artifact；可通过 `--evidence-json` 提供 canonical evidence。`--output` 保存展示报告，`--state-output` 保存可恢复的完整 Agent state。
 
 启动 Demo：
 
@@ -252,6 +298,9 @@ Parser v5 已通过 reading order、heading、block-level section 和 references
 - 独立 `audit_answer` 要求带 citation 与 generation evidence IDs 的完整 answer artifact，不能用来审计无 provenance 的任意文本。
 - Controller 的 wall-clock timeout 会在同步 Tool 返回后立即生效，但不能抢占正在执行的同步 Tool；底层 API 调用仍依赖各 Tool 自身 timeout。
 - 当前没有长期 Memory、跨任务 session、Multi-Agent、autonomous browsing、无限 reflection 或 autonomous workflow。
+- Scholarly Discovery 只返回第三方 metadata，未实现 PDF 自动下载、license 判断、用户选择工作流或自动 corpus ingestion。
+- arXiv/OpenAlex 的 metadata 完整性、去重与来源类型取决于第三方记录；abstract 不能替代解析后 chunk evidence。
+- OpenAlex 需要单独的 `OPENALEX_API_KEY`，其额度、价格与 API 行为由第三方服务控制。
 
 - OCR fallback 尚未接入当前 Parser 主流程；扫描件质量依赖原始 PDF 文本层。
 - 复杂跨栏表格和视觉结构仍有限；caption/table/equation 主要按同 section、同页、y 距离和文档顺序绑定，不是完整视觉语义理解。
@@ -270,7 +319,8 @@ Parser v5 已通过 reading order、heading、block-level section 和 references
 3. 校准 Evidence Sufficiency，降低 false negatives，同时保持 fail-closed 行为。
 4. 将本地绝对路径迁移为可移植配置，并补充数据准备 manifest。
 5. 在独立 Agent benchmark 上评估 task classification、tool trace、policy stop 和失败恢复，再决定是否引入受约束的短期 session context。
-6. 增加稳定 API、并发隔离、可观测性与部署方案。
+6. 为候选论文增加显式用户选择与受控 ingestion manifest，但仍禁止 metadata 直接进入回答生成。
+7. 增加稳定 API、并发隔离、可观测性与部署方案。
 
 ## Development Documentation Rule
 

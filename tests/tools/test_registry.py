@@ -18,6 +18,7 @@ class RegistryTests(unittest.TestCase):
                 "assess_evidence",
                 "generate_grounded_answer",
                 "audit_answer",
+                "search_scholarly_sources",
             ),
         )
         self.assertNotIn("generate_answer", registry.names)

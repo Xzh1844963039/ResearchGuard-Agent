@@ -27,6 +27,7 @@ class ResearchAgentState:
     tool_history: list[dict[str, Any]] = field(default_factory=list)
     observations: list[dict[str, Any]] = field(default_factory=list)
     evidence: list[dict[str, Any]] = field(default_factory=list)
+    candidate_papers: list[dict[str, Any]] = field(default_factory=list)
     answer: dict[str, Any] | None = None
     audit_result: dict[str, Any] | None = None
     status: str = "created"
@@ -76,6 +77,7 @@ class ResearchAgentState:
             "tool_history": copy.deepcopy(self.tool_history),
             "observations": copy.deepcopy(self.observations),
             "evidence": copy.deepcopy(self.evidence),
+            "candidate_papers": copy.deepcopy(self.candidate_papers),
             "answer": copy.deepcopy(self.answer),
             "audit_result": copy.deepcopy(self.audit_result),
             "status": self.status,
@@ -101,6 +103,7 @@ class ResearchAgentState:
             tool_history=copy.deepcopy(list(value.get("tool_history", []))),
             observations=copy.deepcopy(list(value.get("observations", []))),
             evidence=copy.deepcopy(list(value.get("evidence", []))),
+            candidate_papers=copy.deepcopy(list(value.get("candidate_papers", []))),
             answer=copy.deepcopy(value.get("answer")),
             audit_result=copy.deepcopy(value.get("audit_result")),
             status=str(value.get("status", "created")),

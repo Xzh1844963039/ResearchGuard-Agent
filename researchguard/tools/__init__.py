@@ -5,6 +5,8 @@ from researchguard.tools.contracts import EvidenceRecord, ToolError, ToolResult,
 from researchguard.tools.evidence_tool import EvidenceTool
 from researchguard.tools.registry import ToolRegistry, build_default_registry
 from researchguard.tools.retrieval_tool import RetrievalTool
+from researchguard.tools.scholarly import ScholarPaperRecord, ScholarlyProvider
+from researchguard.tools.scholarly_search_tool import ScholarlySearchTool
 
 
 __all__ = [
@@ -13,6 +15,9 @@ __all__ = [
     "EvidenceTool",
     "GuardedAnswerTool",
     "RetrievalTool",
+    "ScholarPaperRecord",
+    "ScholarlyProvider",
+    "ScholarlySearchTool",
     "ToolError",
     "ToolRegistry",
     "ToolResult",
