@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -10,9 +11,32 @@ from researchguard.tools import ToolRegistry
 
 
 PLAN_SCHEMA_VERSION = "researchguard.agent_plan.v1"
-SUPPORTED_TASK_TYPES = ("qa", "comparison", "audit", "literature_search")
+SUPPORTED_TASK_TYPES = (
+    "qa",
+    "comparison",
+    "audit",
+    "literature_search",
+    "literature_review",
+    "paper_comparison",
+    "claim_audit",
+)
+WORKFLOW_TASK_TYPES = {
+    "literature_review": "literature_review",
+    "paper_comparison": "paper_comparison",
+    "claim_audit": "claim_audit",
+}
 COMPARISON_RE = re.compile(
     r"\b(compare|comparison|contrast|difference|different|versus|vs\.?|distinguish)\b",
+    re.IGNORECASE,
+)
+CLAIM_AUDIT_RE = re.compile(
+    r"\b(audit|verify|validate|check|fact-check)\b.{0,40}"
+    r"\b(claim|statement|assertion)\b",
+    re.IGNORECASE,
+)
+LITERATURE_REVIEW_RE = re.compile(
+    r"^\s*(review|survey|synthesize)\b|"
+    r"\b(literature|research)\s+(review|survey|synthesis)\b",
     re.IGNORECASE,
 )
 AUDIT_RE = re.compile(
@@ -51,6 +75,7 @@ class AgentPlan:
     task_type: str
     steps: tuple[PlanStep, ...]
     created_at: str
+    workflow: str | None = None
     schema_version: str = PLAN_SCHEMA_VERSION
 
     def to_dict(self) -> dict[str, Any]:
@@ -58,6 +83,7 @@ class AgentPlan:
             "schema_version": self.schema_version,
             "task_type": self.task_type,
             "created_at": self.created_at,
+            "workflow": self.workflow,
             "steps": [step.to_dict() for step in self.steps],
         }
 
@@ -71,11 +97,18 @@ class BoundedPlanner:
         "search_scholarly_sources": "Discover external candidate paper metadata.",
     }
 
-    def __init__(self, registry: ToolRegistry, *, max_steps: int = 6):
+    def __init__(
+        self,
+        registry: ToolRegistry,
+        *,
+        max_steps: int = 6,
+        workflow_names: Iterable[str] = (),
+    ):
         if max_steps < 1:
             raise ValueError("max_steps must be positive.")
         self.registry = registry
         self.max_steps = max_steps
+        self.workflow_names = tuple(dict.fromkeys(str(name) for name in workflow_names))
 
     def create_plan(
         self,
@@ -92,7 +125,12 @@ class BoundedPlanner:
         if selected_type not in SUPPORTED_TASK_TYPES:
             raise PlannerError(f"Unsupported task type: {selected_type}")
 
-        if selected_type == "literature_search":
+        workflow = WORKFLOW_TASK_TYPES.get(selected_type)
+        if workflow is not None:
+            if workflow not in self.workflow_names:
+                raise PlannerError(f"Workflow is not registered: {workflow}")
+            tool_names: list[str] = []
+        elif selected_type == "literature_search":
             tool_names = ["search_scholarly_sources"]
         elif selected_type == "audit":
             if not has_answer:
@@ -127,14 +165,19 @@ class BoundedPlanner:
             task_type=selected_type,
             steps=steps,
             created_at=utc_timestamp(),
+            workflow=workflow,
         )
 
     @staticmethod
     def classify_task(query: str) -> str:
+        if CLAIM_AUDIT_RE.search(query):
+            return "claim_audit"
         if AUDIT_RE.search(query):
             return "audit"
+        if LITERATURE_REVIEW_RE.search(query):
+            return "literature_review"
         if LITERATURE_SEARCH_RE.search(query):
             return "literature_search"
         if COMPARISON_RE.search(query):
-            return "comparison"
+            return "paper_comparison"
         return "qa"

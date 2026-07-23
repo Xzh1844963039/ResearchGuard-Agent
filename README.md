@@ -6,7 +6,7 @@
 
 ResearchGuard 是一个面向科研论文的多文档 RAG 工程。它不止返回与问题相似的段落，而是把版面解析、section-aware chunking、混合检索、Cross-Encoder 精排、查询改写、证据充分性判断、受证据约束的回答生成和逐 claim 引用核验串成一条可审计流程。
 
-当前 Evidence Engine 主流程已经完成本地集成与验证；v2 在其上增加了 Tool Facade 和受约束的单 Agent Controller。历史 Agent、Memory 和早期 Audit 代码仍保留用于兼容，但不属于当前 Controller 的运行路径。
+当前 Evidence Engine 主流程已经完成本地集成与验证；v2 在其上增加了 Tool Facade、受约束的单 Agent Controller、Scholarly Discovery 和 Research Workflow Skills。历史 Agent、Memory 和早期 Audit 代码仍保留用于兼容，但不属于当前 Controller 的运行路径。
 
 ## Architecture
 
@@ -30,7 +30,7 @@ flowchart LR
 
 ## Agent-ready Architecture
 
-ResearchGuard v2 已完成 **Phase 0 + Phase 1：Evidence Engine Contract + Agent Tool Facade**，并在此基础上完成 **Phase 2：Bounded Single-Agent Controller v1**。这些新增层不改变既有 Parser、Chunking、Indexing、Retrieval 或统一 Pipeline 的核心逻辑。
+ResearchGuard v2 已完成 **Phase 0 + Phase 1：Evidence Engine Contract + Agent Tool Facade**、**Phase 2：Bounded Single-Agent Controller v1**、**Phase 3：Scholarly Discovery Tools v1** 和 **Phase 4：Research Workflow Skills v1**。这些新增层不改变既有 Parser、Chunking、Indexing、Retrieval 或统一 Pipeline 的核心逻辑。
 
 ```mermaid
 flowchart TD
@@ -38,7 +38,14 @@ flowchart TD
     Planner --> Controller["Single-Agent Controller"]
     Policy["Step / Call / Retry / Timeout Policy"] --> Controller
     State["Serializable Agent State"] <--> Controller
+    Controller --> WorkflowRegistry["Workflow Registry"]
     Controller --> Registry["Tool Registry"]
+    WorkflowRegistry --> Review["Literature Review"]
+    WorkflowRegistry --> Compare["Paper Comparison"]
+    WorkflowRegistry --> Claim["Claim Audit"]
+    Review --> Registry
+    Compare --> Registry
+    Claim --> Registry
     Registry --> RetrievalTool["retrieve_evidence"]
     Registry --> EvidenceTool["assess_evidence"]
     Registry --> AnswerTool["generate_grounded_answer"]
@@ -77,12 +84,12 @@ Tool Facade 位于 `researchguard/tools/`：
 
 Phase 2 位于 `researchguard/agent/`：
 
-- `state.py`：定义带 schema version 的 `ResearchAgentState`，记录 query、task type、plan、current step、tool trace、observations、evidence、answer、audit result 和状态时间；支持 JSON 保存与恢复。
-- `planner.py`：使用确定性规则生成 structured plan，仅支持 `qa`、`comparison` 和带完整 answer artifact 的 `audit`，不会生成 Registry 之外的工具。
+- `state.py`：定义带 schema version 的 `ResearchAgentState`，记录 query、task type、plan、workflow name/input/steps/result、tool trace、observations、evidence、answer、audit result 和状态时间；支持 JSON 保存与恢复。
+- `planner.py`：使用确定性规则生成 structured plan；普通 `qa`、兼容 `comparison`、带完整 answer artifact 的 `audit` 和 `literature_search` 生成有限 Tool plan，科研任务则只选择已注册 Workflow。
 - `policy.py`：默认限制为 `max_steps=6`、`max_tool_calls=10`、`max_retry=2`、`timeout=120s`。
 - `controller.py`：执行 `plan → registry tool → observation → state update → stop decision`；Tool failure、Evidence 不足和 policy 超限均会终止。
 
-`qa` 和 `comparison` 的固定有限流程为：
+`qa` 和显式兼容模式 `comparison` 的固定有限流程为：
 
 ```text
 retrieve_evidence
@@ -129,6 +136,29 @@ evidence_eligible = false
 
 **External Discovery ≠ Evidence Verification。** 外部 metadata 必须经过用户选择、PDF ingestion、Parser、Index 和 ResearchGuard Retrieval 后，才可能成为可引用证据。
 
+## Research Workflow Skills
+
+Phase 4 在 `researchguard/workflows/` 增加科研任务编排层。Workflow 负责固定、可解释的任务顺序；Tool 负责单项能力执行；Evidence Engine 继续负责检索、充分性判断、生成和引用核验。Controller 只根据 Planner 输出的 workflow name 调用 `WorkflowRegistry`，不包含任何具体 workflow 的内部步骤。
+
+统一抽象包括：
+
+- `ResearchWorkflow`：声明 `workflow_name`、description、required tools、input/output schema 和 `run(state)`。
+- `WorkflowResult`：记录 version、status、message/reason、结构化 output、完整 trace、起止时间和 latency，可直接序列化为 JSON。
+- `WorkflowLimits`：复用 Agent policy 的 step、tool call、retry 和 timeout 上限。
+- `WorkflowRegistry`：注册并运行 `literature_review`、`paper_comparison` 和 `claim_audit`。
+
+当前支持三个有限工作流：
+
+| Workflow | 固定流程 | 输出 |
+|---|---|---|
+| `literature_review` | scholarly search → corpus retrieval → evidence sufficiency → guarded answer → citation audit | candidate papers、canonical evidence、grounded summary、citations、audit、trace |
+| `paper_comparison` | identify papers → per-paper retrieval → evidence sufficiency → guarded comparison → citation audit | papers、dimensions、分离的 evidence table、summary、citations、audit、trace |
+| `claim_audit` | claim retrieval → evidence sufficiency → citation/claim audit | claim、support level、canonical evidence、citations、audit、trace |
+
+Literature Review 中的 scholarly records 始终保持 `metadata_only=true`，只作为候选列表；summary 只能引用当前本地 corpus 中带 canonical chunk/page/section provenance 的 `EvidenceRecord`。Paper Comparison 可由用户通过 workflow input 指定两篇论文的 name、`doc_id` 和比较维度；提供 `doc_id` 时两次 retrieval 分别使用 document filter，证据表不会混合。Claim Audit 不调用 Answer Generator，而是把用户 claim 与 Evidence Sufficiency 返回的 supporting chunk IDs 组成可审计 artifact，再交给现有 Citation Audit Tool。
+
+`tests/workflows/` 使用 synthetic Tool Registry 验证 metadata/evidence 隔离、unsupported 提前拒绝、双论文 evidence 分离、citation provenance、JSON schema、Registry 选择和 Controller 集成，不修改原 benchmark。
+
 ## Key Features
 
 - **Layout-aware parsing**：使用 PyMuPDF 提取 span、字体与 bbox，恢复单双栏阅读顺序，识别 heading、paragraph、caption、table、equation 和 reference entry。
@@ -140,7 +170,8 @@ evidence_eligible = false
 - **Citation audit**：将答案拆为 atomic claims，逐条核验支持程度和 citation provenance。
 - **Bounded single agent**：确定性有限计划、Registry-only tool calling、可恢复 state 与 step/call/retry/timeout 约束。
 - **Scholarly discovery**：通过可扩展 Provider 发现 arXiv/OpenAlex 候选论文，同时隔离 metadata 与 answer evidence。
-- **Streamlit demo**：展示阶段状态、证据、证据充分性、回答、claim audit 和调试 JSON。
+- **Research workflow skills**：提供 Literature Review、Paper Comparison 和 Claim Audit 三个可解释、可审计的有限科研工作流。
+- **Streamlit demo**：可切换 Evidence Pipeline 与 Research Workflow，展示阶段状态、workflow/tool trace、证据、回答、claim audit 和调试 JSON。
 
 ## Project Structure
 
@@ -151,6 +182,7 @@ researchguard/
   retrieval/       retrieval、rewrite、rerank、evidence、answer 与 citation audit
   tools/           Evidence contracts、Tool Facade 与 Registry
     scholarly/     arXiv/OpenAlex Provider abstraction 与 metadata cache
+  workflows/       Workflow contract、Registry 与三个科研工作流
   pipeline.py      v1 统一 Pipeline
   cli.py           命令行入口
   agent/           Bounded Planner、Policy、State、Controller 与历史兼容代码
@@ -217,7 +249,7 @@ python -m researchguard.cli run `
 
 ```powershell
 python -m researchguard.cli agent-run `
-  --query "Compare CRAG and Self-RAG"
+  --query "How does CRAG reduce hallucination?"
 ```
 
 发现外部候选论文：
@@ -227,7 +259,23 @@ python -m researchguard.cli agent-run `
   --query "Find papers about corrective retrieval augmented generation"
 ```
 
-可使用 `--task-type qa|comparison|audit|literature_search` 覆盖确定性任务分类，并用 `--max-steps`、`--max-tool-calls`、`--max-retry` 和 `--timeout` 收紧 policy。`audit` 任务必须通过 `--answer-json` 提供完整 answer artifact；可通过 `--evidence-json` 提供 canonical evidence。`--output` 保存展示报告，`--state-output` 保存可恢复的完整 Agent state。
+运行 Research Workflow：
+
+```powershell
+python -m researchguard.cli agent-run `
+  --query "Review RAG hallucination mitigation" `
+  --task-type literature_review
+
+python -m researchguard.cli agent-run `
+  --query "Compare CRAG and Self-RAG" `
+  --task-type paper_comparison
+
+python -m researchguard.cli agent-run `
+  --query "Verify this claim: CRAG uses a retrieval evaluator." `
+  --task-type claim_audit
+```
+
+可使用 `--task-type qa|comparison|audit|literature_search|literature_review|paper_comparison|claim_audit` 覆盖确定性任务分类，并用 `--max-steps`、`--max-tool-calls`、`--max-retry` 和 `--timeout` 收紧 policy。`--workflow-input-json` 可以传入 paper name/`doc_id`、comparison dimensions、source preference 或 candidate limit。`audit` 任务必须通过 `--answer-json` 提供完整 answer artifact；可通过 `--evidence-json` 提供 canonical evidence。`--output` 保存展示报告，`--state-output` 保存可恢复的完整 Agent state。
 
 启动 Demo：
 
@@ -235,7 +283,7 @@ python -m researchguard.cli agent-run `
 streamlit run demo/app.py
 ```
 
-Demo 展示 Retrieval evidence、Evidence Sufficiency、Grounded Answer、Citation Audit，以及各阶段 latency、model、config version 和 status。异常会转换为页面错误信息，API key、环境变量与内部路径不会展示。
+Demo 的 Evidence Pipeline 模式展示 Retrieval evidence、Evidence Sufficiency、Grounded Answer、Citation Audit，以及各阶段 latency、model、config version 和 status。Research Workflow 模式可选择 Literature Review、Paper Comparison 或 Claim Audit，并展示 workflow name、tool trace、canonical evidence 和结构化最终结果。异常会转换为页面错误信息，API key、环境变量与内部路径不会展示。
 
 ## Data Preparation
 
@@ -280,6 +328,8 @@ python scripts/retrieve_v1.py `
 
 Parser v5 已通过 reading order、heading、block-level section 和 references 验收。Chunking v1 的长度、跨 section、heading-only、重复 block 与 special block coverage 硬性检查通过，并完成 overlap provenance 和 special block 边界修复。统一 Pipeline 的 strong 案例六阶段全部完成；unsupported 与 partial 案例在 Evidence Gate 后拒绝，Answer Generation 和 Citation Audit 跳过。Streamlit startup、strong render contract、unsupported render contract 与显示脱敏检查均通过。
 
+Phase 4 workflow synthetic tests 覆盖三个 workflow 的成功与拒绝路径、metadata/evidence 边界、双论文 document filter、supporting chunk citation、Workflow Registry、Planner/Controller 委托和 Agent state JSON 往返。它们验证编排不变量，不替代真实 corpus 的质量评测。
+
 可重复运行的验证入口位于 `scripts/validate_*_v1.py` 和 `scripts/validate_parser_v5.py`。验证会读取本地 data/index/cache，并可能更新被 `.gitignore` 排除的 `outputs/`。
 
 ## Design Decisions
@@ -295,6 +345,10 @@ Parser v5 已通过 reading order、heading、block-level section 和 references
 
 - 当前 Planner 是确定性有限 Planner，不进行 LLM task decomposition、动态 re-planning 或开放式工具选择。
 - `generate_grounded_answer` 复用完整统一 Pipeline，因此会自行完成检索到审计的全流程；Controller 的显式 `audit_answer` 步骤使用该 Tool 输出中的同源 answer artifact 与 generation evidence，当前会形成一次可缓存的重复审计。
+- Literature Review 的外部候选 metadata 不会自动下载、解析或进入本地 corpus，因此只列出 discovery candidates；它不会扩大当前可回答证据范围。
+- Paper Comparison 只有在 workflow input 提供 canonical `doc_id` 时才能严格隔离每篇论文的 retrieval filter；仅从自然语言识别 title 时，名称查询仍可能召回同一 corpus 中的其他文档。
+- Guarded Answer Tool 当前只接受 query 并复用冻结 Pipeline，不能直接消费 workflow 预检索的 evidence table；最终 summary 的引用以该 Tool 返回的 generation evidence 为准。
+- Workflow state 可以序列化，但当前不支持从 workflow 内部某一步断点续跑；重试恢复会从整个 workflow 起点重新执行，依赖各 Tool cache 控制外部调用成本。
 - 独立 `audit_answer` 要求带 citation 与 generation evidence IDs 的完整 answer artifact，不能用来审计无 provenance 的任意文本。
 - Controller 的 wall-clock timeout 会在同步 Tool 返回后立即生效，但不能抢占正在执行的同步 Tool；底层 API 调用仍依赖各 Tool 自身 timeout。
 - 当前没有长期 Memory、跨任务 session、Multi-Agent、autonomous browsing、无限 reflection 或 autonomous workflow。
@@ -318,9 +372,11 @@ Parser v5 已通过 reading order、heading、block-level section 和 references
 2. 在独立 hold-out corpus 上扩充 retrieval、answerability 和 citation audit 评测。
 3. 校准 Evidence Sufficiency，降低 false negatives，同时保持 fail-closed 行为。
 4. 将本地绝对路径迁移为可移植配置，并补充数据准备 manifest。
-5. 在独立 Agent benchmark 上评估 task classification、tool trace、policy stop 和失败恢复，再决定是否引入受约束的短期 session context。
-6. 为候选论文增加显式用户选择与受控 ingestion manifest，但仍禁止 metadata 直接进入回答生成。
-7. 增加稳定 API、并发隔离、可观测性与部署方案。
+5. 在独立 Agent/workflow benchmark 上评估 task classification、workflow trace、policy stop、论文识别和失败恢复。
+6. 为候选论文增加显式用户选择与受控 ingestion manifest，并建立 title/DOI 到 canonical `doc_id` 的映射，但仍禁止 metadata 直接进入回答生成。
+7. 设计只接受 canonical evidence 的受控 synthesis Tool，消除 workflow 预检索与 Guarded Answer Tool 内部重检索之间的重复。
+8. 评估是否需要受约束的短期 session context；在有 benchmark 前不引入 Multi-Agent 或开放式自治循环。
+9. 增加稳定 API、并发隔离、可观测性与部署方案。
 
 ## Development Documentation Rule
 

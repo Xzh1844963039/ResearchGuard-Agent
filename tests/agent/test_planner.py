@@ -49,24 +49,19 @@ def _registry(*, include_audit: bool = True) -> ToolRegistry:
 
 
 class BoundedPlannerTests(unittest.TestCase):
-    def test_comparison_query_produces_legal_bounded_plan(self) -> None:
+    def test_comparison_query_selects_registered_workflow(self) -> None:
         registry = _registry()
-        planner = BoundedPlanner(registry, max_steps=6)
+        planner = BoundedPlanner(
+            registry,
+            max_steps=6,
+            workflow_names=("paper_comparison",),
+        )
 
         plan = planner.create_plan("Compare CRAG and Self-RAG")
 
-        self.assertEqual(plan.task_type, "comparison")
-        self.assertEqual(
-            [step.tool for step in plan.steps],
-            [
-                "retrieve_evidence",
-                "assess_evidence",
-                "generate_grounded_answer",
-                "audit_answer",
-            ],
-        )
-        self.assertLessEqual(len(plan.steps), 6)
-        self.assertTrue(all(step.tool in registry.names for step in plan.steps))
+        self.assertEqual(plan.task_type, "paper_comparison")
+        self.assertEqual(plan.workflow, "paper_comparison")
+        self.assertEqual(plan.steps, ())
 
     def test_qa_query_uses_same_guarded_sequence(self) -> None:
         planner = BoundedPlanner(_registry())

@@ -137,6 +137,9 @@ def cmd_agent_run(args: argparse.Namespace) -> None:
         evidence_value = evidence_value.get("evidence")
     if evidence_value is not None and not isinstance(evidence_value, list):
         raise ValueError("--evidence-json must contain a JSON list or an object with an evidence list.")
+    workflow_input = _load_json_file(args.workflow_input_json)
+    if workflow_input is not None and not isinstance(workflow_input, dict):
+        raise ValueError("--workflow-input-json must contain a JSON object.")
 
     policy = AgentPolicy(
         max_steps=args.max_steps,
@@ -155,9 +158,13 @@ def cmd_agent_run(args: argparse.Namespace) -> None:
         task_type=args.task_type,
         answer_artifact=answer_artifact,
         evidence=evidence_value,
+        workflow_input=workflow_input,
     )
     report = {
         "Agent Plan": state.plan,
+        "Workflow Selected": state.workflow_name,
+        "Workflow Steps": state.workflow_steps,
+        "Workflow Result": state.workflow_result,
         "Tool Calls": state.tool_history,
         "Observations": state.observations,
         "Candidate Papers": state.candidate_papers,
@@ -215,7 +222,15 @@ def main() -> None:
     agent_parser.add_argument("--query", required=True, help="Research question or audit instruction.")
     agent_parser.add_argument(
         "--task-type",
-        choices=("qa", "comparison", "audit", "literature_search"),
+        choices=(
+            "qa",
+            "comparison",
+            "audit",
+            "literature_search",
+            "literature_review",
+            "paper_comparison",
+            "claim_audit",
+        ),
         help="Optional task type override; otherwise inferred deterministically.",
     )
     agent_parser.add_argument(
@@ -230,6 +245,10 @@ def main() -> None:
     agent_parser.add_argument(
         "--evidence-json",
         help="Optional canonical evidence JSON for an audit task.",
+    )
+    agent_parser.add_argument(
+        "--workflow-input-json",
+        help="Optional workflow parameters such as papers, doc_ids, or comparison dimensions.",
     )
     agent_parser.add_argument("--output", help="Optional agent report JSON path.")
     agent_parser.add_argument("--state-output", help="Optional resumable agent state JSON path.")

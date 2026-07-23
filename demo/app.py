@@ -27,6 +27,7 @@ from demo.utils import (
     stage_rows,
     validate_pipeline_result,
 )
+from researchguard.agent import BoundedResearchAgentController
 from researchguard.pipeline import ResearchGuardPipeline
 
 
@@ -36,6 +37,12 @@ EXAMPLE_QUERIES = (
     "What is the difference between RAG-Sequence and RAG-Token?",
     "Does any indexed paper describe quantum error correction for superconducting qubits?",
 )
+DEMO_MODES = ("Evidence Pipeline", "Research Workflow")
+WORKFLOW_TASKS = {
+    "Literature Review": "literature_review",
+    "Paper Comparison": "paper_comparison",
+    "Claim Audit": "claim_audit",
+}
 
 
 PAGE_CSS = """
@@ -116,8 +123,17 @@ def get_pipeline() -> ResearchGuardPipeline:
     return ResearchGuardPipeline.from_config(PIPELINE_CONFIG)
 
 
+@st.cache_resource(show_spinner=False)
+def get_agent_controller() -> BoundedResearchAgentController:
+    return BoundedResearchAgentController(config_path=PIPELINE_CONFIG)
+
+
 def run_researchguard(query: str) -> dict[str, Any]:
     return validate_pipeline_result(get_pipeline().run(query))
+
+
+def run_research_workflow(query: str, task_type: str) -> dict[str, Any]:
+    return get_agent_controller().run(query, task_type=task_type).to_dict()
 
 
 def render_stage_status(result: dict[str, Any]) -> None:
@@ -261,11 +277,95 @@ def render_result(result: dict[str, Any]) -> None:
         st.json(sanitize_for_display(details), expanded=2)
 
 
+def render_workflow_result(state: dict[str, Any]) -> None:
+    status = str(state.get("status") or "failed")
+    tone = {
+        "completed": "success",
+        "rejected": "warning",
+        "failed": "error",
+    }.get(status, "neutral")
+    workflow_name = str(state.get("workflow_name") or "Not selected")
+    st.markdown(
+        f"""
+        <div class="rg-final {tone}">
+            <div class="rg-final-label">Agent status</div>
+            <div class="rg-final-value">{html.escape(status.replace("_", " ").title())}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    columns = st.columns(2)
+    columns[0].metric("Task Type", str(state.get("task_type") or "Unknown"))
+    columns[1].metric("Workflow Selected", workflow_name)
+
+    st.markdown("## Tool Trace")
+    steps = state.get("workflow_steps") or []
+    if steps:
+        st.dataframe(
+            steps,
+            column_order=("step", "tool_name", "status", "latency_ms", "trace_id"),
+            hide_index=True,
+            use_container_width=True,
+        )
+    else:
+        st.info("No workflow tools were executed.")
+
+    st.markdown("## Evidence")
+    evidence = state.get("evidence") or []
+    if not evidence:
+        st.info("No canonical corpus evidence was returned.")
+    for index, item in enumerate(evidence, start=1):
+        label = (
+            f"Evidence {index} | {item.get('source') or item.get('doc_id') or 'Unknown'}"
+            f" | {item.get('section') or 'Unknown'}"
+        )
+        with st.expander(label, expanded=index <= 2):
+            metadata = st.columns(2)
+            metadata[0].metric("Page", item.get("page") or "Unknown")
+            score = item.get("score")
+            score_label = f"{score:.4f}" if isinstance(score, (int, float)) else "n/a"
+            metadata[1].metric("Score", score_label)
+            st.write(item.get("content") or "No evidence text available.")
+            st.caption(f"Chunk ID: {item.get('chunk_id') or 'Unknown'}")
+
+    st.markdown("## Final Result")
+    workflow_result = state.get("workflow_result")
+    output = workflow_result.get("output") if isinstance(workflow_result, dict) else None
+    if isinstance(output, dict):
+        summary = output.get("summary")
+        if summary:
+            st.markdown(
+                f'<div class="rg-answer">{html.escape(str(summary))}</div>',
+                unsafe_allow_html=True,
+            )
+        elif output.get("claim"):
+            st.write(output["claim"])
+            st.caption(f"Support level: {output.get('support_level', 'unknown')}")
+        else:
+            st.info("The workflow returned a structured result without a narrative summary.")
+        citations = output.get("citations") or []
+        if citations:
+            st.dataframe(citations, hide_index=True, use_container_width=True)
+    else:
+        st.info(str(state.get("reason") or "No workflow result was returned."))
+
+    with st.expander("Show Agent Details"):
+        st.json(sanitize_for_display(state), expanded=2)
+
+
 def main() -> None:
     st.set_page_config(page_title="ResearchGuard", layout="wide", initial_sidebar_state="auto")
     st.markdown(PAGE_CSS, unsafe_allow_html=True)
 
     with st.sidebar:
+        st.markdown("### Execution Mode")
+        mode = st.selectbox("Mode", DEMO_MODES, label_visibility="collapsed")
+        workflow_label = st.selectbox(
+            "Workflow Task",
+            tuple(WORKFLOW_TASKS),
+            disabled=mode != "Research Workflow",
+        )
+        st.divider()
         st.markdown("### Demo Queries")
         selected = st.selectbox("Example", EXAMPLE_QUERIES, label_visibility="collapsed")
         if st.button("Use Example", use_container_width=True):
@@ -273,6 +373,7 @@ def main() -> None:
         st.divider()
         st.markdown("### Runtime")
         st.caption("Pipeline v1")
+        st.caption("Workflow Skills v1")
         st.caption("Local Chroma index")
         st.caption("Evidence gate enabled")
 
@@ -294,20 +395,32 @@ def main() -> None:
         if not query.strip():
             st.warning("Enter a research question before running the pipeline.")
         else:
-            with st.spinner("Running ResearchGuard pipeline..."):
+            with st.spinner("Running ResearchGuard..."):
                 try:
-                    st.session_state["pipeline_result"] = run_researchguard(query.strip())
-                    st.session_state.pop("pipeline_error", None)
+                    if mode == "Research Workflow":
+                        st.session_state["workflow_result"] = run_research_workflow(
+                            query.strip(),
+                            WORKFLOW_TASKS[workflow_label],
+                        )
+                        st.session_state.pop("pipeline_result", None)
+                    else:
+                        st.session_state["pipeline_result"] = run_researchguard(query.strip())
+                        st.session_state.pop("workflow_result", None)
+                    st.session_state.pop("execution_error", None)
                 except Exception as exc:
                     st.session_state.pop("pipeline_result", None)
-                    st.session_state["pipeline_error"] = safe_error_message(exc)
+                    st.session_state.pop("workflow_result", None)
+                    st.session_state["execution_error"] = safe_error_message(exc)
 
-    if st.session_state.get("pipeline_error"):
+    if st.session_state.get("execution_error"):
         st.error("ResearchGuard could not complete this request.")
-        st.code(st.session_state["pipeline_error"], language="text")
+        st.code(st.session_state["execution_error"], language="text")
     result = st.session_state.get("pipeline_result")
     if isinstance(result, dict):
         render_result(result)
+    workflow_result = st.session_state.get("workflow_result")
+    if isinstance(workflow_result, dict):
+        render_workflow_result(workflow_result)
 
 
 if __name__ == "__main__":

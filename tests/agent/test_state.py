@@ -13,8 +13,11 @@ class ResearchAgentStateTests(unittest.TestCase):
     def test_state_is_json_serializable_and_restorable(self) -> None:
         state = ResearchAgentState(
             query="Compare CRAG and Self-RAG",
-            task_type="comparison",
-            plan=[{"step_id": 1, "tool": "retrieve_evidence"}],
+            task_type="paper_comparison",
+            workflow_name="paper_comparison",
+            workflow_input={"comparison_dimensions": ["method", "limitation"]},
+            workflow_steps=[{"step": 1, "tool_name": "search_scholarly_sources"}],
+            workflow_result={"status": "success"},
             evidence=[
                 {
                     "chunk_id": "paper::chunk-1",
@@ -33,7 +36,10 @@ class ResearchAgentStateTests(unittest.TestCase):
         payload = json.loads(state.to_json())
 
         self.assertEqual(payload["schema_version"], AGENT_STATE_SCHEMA_VERSION)
-        self.assertEqual(payload["task_type"], "comparison")
+        self.assertEqual(payload["task_type"], "paper_comparison")
+        self.assertEqual(payload["workflow_name"], "paper_comparison")
+        self.assertEqual(payload["workflow_input"]["comparison_dimensions"], ["method", "limitation"])
+        self.assertEqual(payload["workflow_result"]["status"], "success")
         self.assertEqual(payload["evidence"][0]["chunk_id"], "paper::chunk-1")
 
         with tempfile.TemporaryDirectory() as temp_dir:

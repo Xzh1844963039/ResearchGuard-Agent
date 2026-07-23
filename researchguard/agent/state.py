@@ -22,6 +22,10 @@ class ResearchAgentState:
     query: str
     task_type: str = "unknown"
     plan: list[dict[str, Any]] = field(default_factory=list)
+    workflow_name: str | None = None
+    workflow_input: dict[str, Any] = field(default_factory=dict)
+    workflow_steps: list[dict[str, Any]] = field(default_factory=list)
+    workflow_result: dict[str, Any] | None = None
     current_step: int = 0
     retry_counts: dict[str, int] = field(default_factory=dict)
     tool_history: list[dict[str, Any]] = field(default_factory=list)
@@ -72,6 +76,10 @@ class ResearchAgentState:
             "query": self.query,
             "task_type": self.task_type,
             "plan": copy.deepcopy(self.plan),
+            "workflow_name": self.workflow_name,
+            "workflow_input": copy.deepcopy(self.workflow_input),
+            "workflow_steps": copy.deepcopy(self.workflow_steps),
+            "workflow_result": copy.deepcopy(self.workflow_result),
             "current_step": self.current_step,
             "retry_counts": copy.deepcopy(self.retry_counts),
             "tool_history": copy.deepcopy(self.tool_history),
@@ -95,6 +103,14 @@ class ResearchAgentState:
             query=str(value.get("query", "")),
             task_type=str(value.get("task_type", "unknown")),
             plan=copy.deepcopy(list(value.get("plan", []))),
+            workflow_name=(
+                str(value["workflow_name"])
+                if value.get("workflow_name") is not None
+                else None
+            ),
+            workflow_input=copy.deepcopy(dict(value.get("workflow_input", {}))),
+            workflow_steps=copy.deepcopy(list(value.get("workflow_steps", []))),
+            workflow_result=copy.deepcopy(value.get("workflow_result")),
             current_step=int(value.get("current_step", 0)),
             retry_counts={
                 str(key): int(item)

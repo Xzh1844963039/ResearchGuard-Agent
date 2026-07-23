@@ -17,6 +17,11 @@ from researchguard.tools import (
     ToolResult,
     build_default_registry,
 )
+from researchguard.workflows import (
+    WorkflowLimits,
+    WorkflowRegistry,
+    build_default_workflow_registry,
+)
 
 
 class BoundedResearchAgentController:
@@ -24,15 +29,37 @@ class BoundedResearchAgentController:
         self,
         *,
         registry: ToolRegistry | None = None,
+        workflow_registry: WorkflowRegistry | None = None,
         planner: Any | None = None,
         policy: AgentPolicy | None = None,
         config_path: str | Path = "configs/pipeline_v1.yaml",
     ):
         self.policy = policy or AgentPolicy()
         self.registry = registry or build_default_registry(config_path)
+        if workflow_registry is not None:
+            self.workflow_registry = workflow_registry
+        elif registry is None or {
+            "retrieve_evidence",
+            "assess_evidence",
+            "generate_grounded_answer",
+            "audit_answer",
+            "search_scholarly_sources",
+        }.issubset(self.registry.names):
+            self.workflow_registry = build_default_workflow_registry(
+                self.registry,
+                limits=WorkflowLimits(
+                    max_steps=self.policy.max_steps,
+                    max_tool_calls=self.policy.max_tool_calls,
+                    max_retry=self.policy.max_retry,
+                    timeout=self.policy.timeout,
+                ),
+            )
+        else:
+            self.workflow_registry = WorkflowRegistry()
         self.planner = planner or BoundedPlanner(
             self.registry,
             max_steps=self.policy.max_steps,
+            workflow_names=self.workflow_registry.names,
         )
 
     def run(
@@ -42,11 +69,13 @@ class BoundedResearchAgentController:
         task_type: str | None = None,
         answer_artifact: Mapping[str, Any] | None = None,
         evidence: Iterable[EvidenceRecord | Mapping[str, Any]] | None = None,
+        workflow_input: Mapping[str, Any] | None = None,
     ) -> ResearchAgentState:
         state = ResearchAgentState(
             query=query,
             answer=copy.deepcopy(dict(answer_artifact)) if answer_artifact is not None else None,
             evidence=self._serialize_evidence(evidence or ()),
+            workflow_input=copy.deepcopy(dict(workflow_input or {})),
         )
         try:
             plan = self.planner.create_plan(
@@ -61,16 +90,21 @@ class BoundedResearchAgentController:
 
         state.task_type = plan.task_type
         state.plan = [step.to_dict() for step in plan.steps]
+        state.workflow_name = plan.workflow
         state.set_status("planned")
         plan_error = self.policy.validate_plan(state)
         if plan_error:
             state.set_status("failed", plan_error)
             return state
+        if state.workflow_name:
+            return self.execute_workflow(state)
         return self.execute(state)
 
     def resume(self, state: ResearchAgentState) -> ResearchAgentState:
         if state.status in {"completed", "rejected", "failed"}:
             return state
+        if state.workflow_name:
+            return self.execute_workflow(state)
         if not state.plan:
             state.set_status("failed", "missing_plan")
             return state
@@ -79,6 +113,30 @@ class BoundedResearchAgentController:
             state.set_status("failed", plan_error)
             return state
         return self.execute(state)
+
+    def execute_workflow(self, state: ResearchAgentState) -> ResearchAgentState:
+        state.set_status("running")
+        workflow_name = state.workflow_name or ""
+        if workflow_name not in self.workflow_registry.names:
+            state.set_status("failed", f"unregistered_workflow: {workflow_name or 'missing'}")
+            return state
+        try:
+            result = self.workflow_registry.run(workflow_name, state)
+        except Exception as exc:
+            state.set_status(
+                "failed",
+                f"workflow_error: {type(exc).__name__}: {exc}",
+            )
+            return state
+        state.workflow_result = result.to_dict()
+        state.current_step = len(state.workflow_steps)
+        if result.status == "success":
+            state.set_status("completed")
+        elif result.status == "rejected":
+            state.set_status("rejected", result.reason or "workflow_rejected")
+        else:
+            state.set_status("failed", result.reason or "workflow_failed")
+        return state
 
     def execute(self, state: ResearchAgentState) -> ResearchAgentState:
         started = time.perf_counter()
