@@ -18,6 +18,7 @@ class ResearchAgentStateTests(unittest.TestCase):
             workflow_input={"comparison_dimensions": ["method", "limitation"]},
             workflow_steps=[{"step": 1, "tool_name": "search_scholarly_sources"}],
             workflow_result={"status": "success"},
+            memory_status={"enabled": True, "persisted": True, "errors": []},
             evidence=[
                 {
                     "chunk_id": "paper::chunk-1",
@@ -40,6 +41,7 @@ class ResearchAgentStateTests(unittest.TestCase):
         self.assertEqual(payload["workflow_name"], "paper_comparison")
         self.assertEqual(payload["workflow_input"]["comparison_dimensions"], ["method", "limitation"])
         self.assertEqual(payload["workflow_result"]["status"], "success")
+        self.assertTrue(payload["memory_status"]["persisted"])
         self.assertEqual(payload["evidence"][0]["chunk_id"], "paper::chunk-1")
 
         with tempfile.TemporaryDirectory() as temp_dir:

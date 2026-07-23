@@ -10,6 +10,7 @@ from researchguard.reporting.audit_report import render_audit_markdown
 
 
 DEFAULT_PIPELINE_CONFIG = "configs/pipeline_v1.yaml"
+DEFAULT_RESEARCH_MEMORY_ROOT = "data/memory/research_runs"
 
 
 def cmd_status(args: argparse.Namespace) -> None:
@@ -165,6 +166,7 @@ def cmd_agent_run(args: argparse.Namespace) -> None:
         "Workflow Selected": state.workflow_name,
         "Workflow Steps": state.workflow_steps,
         "Workflow Result": state.workflow_result,
+        "Research Memory": state.memory_status,
         "Tool Calls": state.tool_history,
         "Observations": state.observations,
         "Candidate Papers": state.candidate_papers,
@@ -190,6 +192,52 @@ def cmd_agent_run(args: argparse.Namespace) -> None:
         print(f"Agent state: {state_path}")
     if state.status == "failed":
         raise SystemExit(1)
+
+
+def cmd_memory_list(args: argparse.Namespace) -> None:
+    from researchguard.memory import ResearchRunStore
+
+    store = ResearchRunStore(args.memory_root)
+    records = store.list_runs(
+        limit=args.limit,
+        workflow=args.workflow,
+        status=args.status,
+    )
+    print(
+        json.dumps(
+            {"count": len(records), "runs": [record.to_dict() for record in records]},
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+
+def cmd_memory_show(args: argparse.Namespace) -> None:
+    from researchguard.memory import ResearchMemory
+
+    result = ResearchMemory(args.memory_root).show(args.run_id)
+    if result is None:
+        print(json.dumps({"error": "run_not_found", "run_id": args.run_id}, indent=2))
+        raise SystemExit(1)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+def cmd_memory_search(args: argparse.Namespace) -> None:
+    from researchguard.memory import ResearchRunStore
+
+    records = ResearchRunStore(args.memory_root).find_previous_runs(
+        args.query,
+        workflow=args.workflow,
+        since=args.since,
+        limit=args.limit,
+    )
+    print(
+        json.dumps(
+            {"count": len(records), "runs": [record.to_dict() for record in records]},
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
 
 
 def main() -> None:
@@ -257,6 +305,47 @@ def main() -> None:
     agent_parser.add_argument("--max-retry", type=int, default=2)
     agent_parser.add_argument("--timeout", type=float, default=120.0)
     agent_parser.set_defaults(func=cmd_agent_run)
+
+    memory_list_parser = subparsers.add_parser(
+        "memory-list",
+        help="List persisted research runs.",
+    )
+    memory_list_parser.add_argument("--limit", type=int, default=20)
+    memory_list_parser.add_argument("--workflow")
+    memory_list_parser.add_argument(
+        "--status",
+        choices=("created", "planned", "running", "completed", "rejected", "failed"),
+    )
+    memory_list_parser.add_argument(
+        "--memory-root",
+        default=DEFAULT_RESEARCH_MEMORY_ROOT,
+    )
+    memory_list_parser.set_defaults(func=cmd_memory_list)
+
+    memory_show_parser = subparsers.add_parser(
+        "memory-show",
+        help="Show one research run with evidence ledger and failures.",
+    )
+    memory_show_parser.add_argument("--run-id", required=True)
+    memory_show_parser.add_argument(
+        "--memory-root",
+        default=DEFAULT_RESEARCH_MEMORY_ROOT,
+    )
+    memory_show_parser.set_defaults(func=cmd_memory_show)
+
+    memory_search_parser = subparsers.add_parser(
+        "memory-search",
+        help="Find previous research runs by keyword.",
+    )
+    memory_search_parser.add_argument("--query", required=True)
+    memory_search_parser.add_argument("--workflow")
+    memory_search_parser.add_argument("--since")
+    memory_search_parser.add_argument("--limit", type=int, default=20)
+    memory_search_parser.add_argument(
+        "--memory-root",
+        default=DEFAULT_RESEARCH_MEMORY_ROOT,
+    )
+    memory_search_parser.set_defaults(func=cmd_memory_search)
 
     args = parser.parse_args()
 

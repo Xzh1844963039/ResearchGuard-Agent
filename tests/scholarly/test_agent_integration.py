@@ -83,7 +83,10 @@ class ScholarlyAgentIntegrationTests(unittest.TestCase):
         registry = ToolRegistry()
         tool = FakeScholarlyTool()
         registry.register(tool)
-        controller = BoundedResearchAgentController(registry=registry)
+        controller = BoundedResearchAgentController(
+            registry=registry,
+            memory_enabled=False,
+        )
 
         state = controller.run("Find papers about CRAG")
 
@@ -102,7 +105,10 @@ class ScholarlyAgentIntegrationTests(unittest.TestCase):
     def test_invalid_candidate_schema_fails_closed(self) -> None:
         registry = ToolRegistry()
         registry.register(InvalidScholarlyTool())
-        controller = BoundedResearchAgentController(registry=registry)
+        controller = BoundedResearchAgentController(
+            registry=registry,
+            memory_enabled=False,
+        )
 
         state = controller.run("Find papers about CRAG")
 

@@ -9,6 +9,7 @@ from typing import Any, Iterable, Mapping
 from researchguard.agent.planner import BoundedPlanner, PlannerError
 from researchguard.agent.policy import AgentPolicy
 from researchguard.agent.state import ResearchAgentState, utc_timestamp
+from researchguard.memory import DEFAULT_MEMORY_ROOT, ResearchMemory
 from researchguard.tools import (
     EvidenceRecord,
     ScholarPaperRecord,
@@ -32,10 +33,16 @@ class BoundedResearchAgentController:
         workflow_registry: WorkflowRegistry | None = None,
         planner: Any | None = None,
         policy: AgentPolicy | None = None,
+        memory: ResearchMemory | None = None,
+        memory_enabled: bool = True,
+        memory_root: str | Path = DEFAULT_MEMORY_ROOT,
         config_path: str | Path = "configs/pipeline_v1.yaml",
     ):
         self.policy = policy or AgentPolicy()
         self.registry = registry or build_default_registry(config_path)
+        self.memory = memory if memory is not None else (
+            ResearchMemory(memory_root) if memory_enabled else None
+        )
         if workflow_registry is not None:
             self.workflow_registry = workflow_registry
         elif registry is None or {
@@ -76,7 +83,27 @@ class BoundedResearchAgentController:
             answer=copy.deepcopy(dict(answer_artifact)) if answer_artifact is not None else None,
             evidence=self._serialize_evidence(evidence or ()),
             workflow_input=copy.deepcopy(dict(workflow_input or {})),
+            memory_status={
+                "enabled": self.memory is not None,
+                "started": False,
+                "persisted": False,
+                "errors": [],
+            },
         )
+        self._start_memory(state)
+        return self._finalize_memory(
+            self._plan_and_execute(
+                state,
+                task_type=task_type,
+            )
+        )
+
+    def _plan_and_execute(
+        self,
+        state: ResearchAgentState,
+        *,
+        task_type: str | None,
+    ) -> ResearchAgentState:
         try:
             plan = self.planner.create_plan(
                 state.query,
@@ -104,15 +131,46 @@ class BoundedResearchAgentController:
         if state.status in {"completed", "rejected", "failed"}:
             return state
         if state.workflow_name:
-            return self.execute_workflow(state)
+            return self._finalize_memory(self.execute_workflow(state))
         if not state.plan:
             state.set_status("failed", "missing_plan")
-            return state
+            return self._finalize_memory(state)
         plan_error = self.policy.validate_plan(state)
         if plan_error:
             state.set_status("failed", plan_error)
+            return self._finalize_memory(state)
+        return self._finalize_memory(self.execute(state))
+
+    def _start_memory(self, state: ResearchAgentState) -> None:
+        if self.memory is None:
+            return
+        try:
+            self.memory.start_run(state)
+            state.memory_status["started"] = True
+        except Exception as exc:
+            state.memory_status["errors"].append(
+                f"start_run: {type(exc).__name__}: {exc}"
+            )
+        state.touch()
+
+    def _finalize_memory(self, state: ResearchAgentState) -> ResearchAgentState:
+        if self.memory is None:
             return state
-        return self.execute(state)
+        try:
+            result = self.memory.complete_run(state)
+            previous_errors = list(state.memory_status.get("errors", []))
+            result_errors = list(result.get("errors", []))
+            state.memory_status.update(
+                {key: value for key, value in result.items() if key != "errors"}
+            )
+            state.memory_status["errors"] = previous_errors + result_errors
+        except Exception as exc:
+            state.memory_status["persisted"] = False
+            state.memory_status["errors"].append(
+                f"complete_run: {type(exc).__name__}: {exc}"
+            )
+        state.touch()
+        return state
 
     def execute_workflow(self, state: ResearchAgentState) -> ResearchAgentState:
         state.set_status("running")

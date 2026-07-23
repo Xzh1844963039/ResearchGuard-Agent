@@ -415,6 +415,7 @@ class WorkflowTests(unittest.TestCase):
         controller = BoundedResearchAgentController(
             registry=registry,
             workflow_registry=workflows,
+            memory_enabled=False,
         )
         state = controller.run(
             "Compare Paper A and Paper B",

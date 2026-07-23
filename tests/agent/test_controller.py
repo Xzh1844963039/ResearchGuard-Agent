@@ -181,7 +181,10 @@ class RepeatingPlanner:
 class ControllerTests(unittest.TestCase):
     def test_successful_controller_uses_registry_and_records_trace(self) -> None:
         registry, tools = _complete_registry()
-        controller = BoundedResearchAgentController(registry=registry)
+        controller = BoundedResearchAgentController(
+            registry=registry,
+            memory_enabled=False,
+        )
 
         state = controller.run("How does CRAG reduce hallucination?")
 
@@ -203,7 +206,10 @@ class ControllerTests(unittest.TestCase):
 
     def test_unsupported_evidence_stops_before_answer(self) -> None:
         registry, tools = _complete_registry(unsupported=True)
-        controller = BoundedResearchAgentController(registry=registry)
+        controller = BoundedResearchAgentController(
+            registry=registry,
+            memory_enabled=False,
+        )
 
         state = controller.run("Does the corpus cover quantum error correction?")
 
@@ -227,6 +233,7 @@ class ControllerTests(unittest.TestCase):
             registry=registry,
             planner=RepeatingPlanner(4),
             policy=AgentPolicy(max_steps=6, max_tool_calls=2, max_retry=0, timeout=10),
+            memory_enabled=False,
         )
 
         state = controller.run("Synthetic repeated task")
@@ -259,6 +266,7 @@ class ControllerTests(unittest.TestCase):
             registry=registry,
             planner=RepeatingPlanner(1),
             policy=AgentPolicy(max_steps=6, max_tool_calls=10, max_retry=2, timeout=10),
+            memory_enabled=False,
         )
 
         state = controller.run("Synthetic retry task")
@@ -282,6 +290,7 @@ class ControllerTests(unittest.TestCase):
         controller = BoundedResearchAgentController(
             registry=registry,
             planner=RepeatingPlanner(1),
+            memory_enabled=False,
         )
 
         state = controller.run("Synthetic exception task")
@@ -303,6 +312,7 @@ class ControllerTests(unittest.TestCase):
             registry=registry,
             planner=RepeatingPlanner(1),
             policy=AgentPolicy(max_steps=6, max_tool_calls=10, max_retry=0, timeout=0.005),
+            memory_enabled=False,
         )
 
         state = controller.run("Synthetic timeout task")
@@ -313,7 +323,10 @@ class ControllerTests(unittest.TestCase):
 
     def test_audit_task_uses_supplied_artifacts(self) -> None:
         registry, tools = _complete_registry()
-        controller = BoundedResearchAgentController(registry=registry)
+        controller = BoundedResearchAgentController(
+            registry=registry,
+            memory_enabled=False,
+        )
 
         state = controller.run(
             "Audit this answer and its citations",
