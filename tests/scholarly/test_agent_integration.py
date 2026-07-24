@@ -113,10 +113,10 @@ class ScholarlyAgentIntegrationTests(unittest.TestCase):
         state = controller.run("Find papers about CRAG")
 
         self.assertEqual(state.status, "failed")
-        self.assertEqual(state.reason, "invalid_tool_output")
+        self.assertEqual(state.reason, "skill_execution_error")
         self.assertEqual(state.candidate_papers, [])
         self.assertEqual(
-            state.observations[0]["output_validation_error"]["exception_type"],
+            state.observations[-1]["output"]["error_type"],
             "ValueError",
         )
 

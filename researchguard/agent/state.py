@@ -32,6 +32,8 @@ class ResearchAgentState:
     memory_context: dict[str, Any] = field(default_factory=dict)
     current_step: int = 0
     retry_counts: dict[str, int] = field(default_factory=dict)
+    skill_history: list[dict[str, Any]] = field(default_factory=list)
+    skill_outputs: dict[str, dict[str, Any]] = field(default_factory=dict)
     tool_history: list[dict[str, Any]] = field(default_factory=list)
     observations: list[dict[str, Any]] = field(default_factory=list)
     evidence: list[dict[str, Any]] = field(default_factory=list)
@@ -94,6 +96,8 @@ class ResearchAgentState:
             "memory_context": copy.deepcopy(self.memory_context),
             "current_step": self.current_step,
             "retry_counts": copy.deepcopy(self.retry_counts),
+            "skill_history": copy.deepcopy(self.skill_history),
+            "skill_outputs": copy.deepcopy(self.skill_outputs),
             "tool_history": copy.deepcopy(self.tool_history),
             "observations": copy.deepcopy(self.observations),
             "evidence": copy.deepcopy(self.evidence),
@@ -138,6 +142,8 @@ class ResearchAgentState:
                 str(key): int(item)
                 for key, item in dict(value.get("retry_counts", {})).items()
             },
+            skill_history=copy.deepcopy(list(value.get("skill_history", []))),
+            skill_outputs=copy.deepcopy(dict(value.get("skill_outputs", {}))),
             tool_history=copy.deepcopy(list(value.get("tool_history", []))),
             observations=copy.deepcopy(list(value.get("observations", []))),
             evidence=copy.deepcopy(list(value.get("evidence", []))),

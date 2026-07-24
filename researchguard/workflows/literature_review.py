@@ -50,6 +50,12 @@ class LiteratureReviewWorkflow(ResearchWorkflow):
         "generate_grounded_answer",
         "audit_answer",
     )
+    skill_template = (
+        "search_papers",
+        "retrieve_evidence",
+        "analyze_claims",
+        "generate_report",
+    )
     input_schema = {
         "topic": "optional topic override; defaults to state.query",
         "sources": "optional scholarly provider list",

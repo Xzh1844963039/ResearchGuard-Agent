@@ -55,6 +55,12 @@ class PaperComparisonWorkflow(ResearchWorkflow):
         "generate_grounded_answer",
         "audit_answer",
     )
+    skill_template = (
+        "search_papers",
+        "retrieve_evidence",
+        "compare_evidence",
+        "generate_report",
+    )
     input_schema = {
         "papers": "optional two-item list of names or {name, doc_id} mappings",
         "comparison_dimensions": "optional list; defaults to method/dataset/metric/limitation",

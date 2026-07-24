@@ -43,6 +43,9 @@ class TraceCollector:
             ),
             workflow_name=state.workflow_name,
             workflow_steps=tuple(copy.deepcopy(state.workflow_steps)),
+            skill_calls=tuple(
+                copy.deepcopy(getattr(state, "skill_history", ()))
+            ),
             tool_calls=tuple(copy.deepcopy(state.tool_history)),
             observations=tuple(copy.deepcopy(state.observations)),
             evidence=tuple(copy.deepcopy(state.evidence)),
@@ -77,6 +80,17 @@ class TraceCollector:
                 "summary": state.workflow_name or state.task_type,
             },
         ]
+        for call in getattr(state, "skill_history", ()):
+            timeline.append(
+                {
+                    "stage": "skill",
+                    "status": str(call.get("output_status", "unknown")),
+                    "timestamp": call.get("timestamp"),
+                    "summary": str(call.get("skill_name", "unknown")),
+                    "trace_id": call.get("trace_id"),
+                    "latency_ms": call.get("latency_ms"),
+                }
+            )
         for call in state.tool_history:
             timeline.append(
                 {

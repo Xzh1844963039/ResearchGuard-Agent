@@ -64,6 +64,15 @@ class PlannerValidator:
             errors.append("plan_budget_exceeds_policy_revisions")
 
         skill_names = [step.skill for step in plan.steps]
+        duplicates = sorted(
+            {
+                name
+                for name in skill_names
+                if skill_names.count(name) > 1
+            }
+        )
+        if duplicates:
+            errors.append("skill_cycle_or_duplicate:" + ",".join(duplicates))
         estimated_tool_calls = 0
         for index, step in enumerate(plan.steps, start=1):
             if step.skill not in self.skills.names:
@@ -90,7 +99,7 @@ class PlannerValidator:
         if "audit_answer" in skill_names:
             errors.append("raw_audit_tool_is_not_a_skill")
 
-        self._validate_evidence_first(
+        self._validate_skill_sequence(
             plan.task_type,
             skill_names,
             has_evidence=has_evidence,
@@ -104,7 +113,7 @@ class PlannerValidator:
         )
 
     @staticmethod
-    def _validate_evidence_first(
+    def _validate_skill_sequence(
         task_type: str,
         skills: list[str],
         *,
@@ -112,80 +121,62 @@ class PlannerValidator:
         has_answer: bool,
         errors: list[str],
     ) -> None:
+        metadata_skills = {"search_papers", "search_scholarly_sources"}
         if task_type == "literature_search":
-            if skills != ["search_scholarly_sources"]:
+            if len(skills) != 1 or skills[0] not in metadata_skills:
                 errors.append("literature_search_must_be_metadata_only")
             return
 
         generates = "generate_report" in skills
         audits = "audit_claims" in skills
         assesses = "assess_evidence" in skills
-        retrieves = (
-            "retrieve_evidence" in skills
-            or "compare_evidence" in skills
-            or has_evidence
+        retrieve_index = (
+            skills.index("retrieve_evidence")
+            if "retrieve_evidence" in skills
+            else None
         )
-        evidence_indexes = [
-            index
-            for index, skill in enumerate(skills)
-            if skill in {"retrieve_evidence", "compare_evidence"}
-        ]
-        if assesses and not has_evidence:
-            assess_index = skills.index("assess_evidence")
-            if not evidence_indexes:
-                errors.append("evidence_gate_without_retrieval")
-            elif min(evidence_indexes) > assess_index:
-                errors.append("retrieval_after_evidence_gate")
+        evidence_available = has_evidence or retrieve_index is not None
+
+        for dependent in (
+            "assess_evidence",
+            "analyze_claims",
+            "compare_evidence",
+            "audit_claims",
+            "generate_report",
+        ):
+            if dependent not in skills or has_evidence:
+                continue
+            dependent_index = skills.index(dependent)
+            if retrieve_index is None:
+                errors.append(f"{dependent}_without_evidence")
+            elif retrieve_index > dependent_index:
+                errors.append(f"{dependent}_before_retrieval")
 
         if generates:
-            generate_indexes = [
-                index
-                for index, skill in enumerate(skills)
-                if skill == "generate_report"
-            ]
-            audit_indexes = [
-                index
-                for index, skill in enumerate(skills)
-                if skill == "audit_claims"
-            ]
-            generate_index = generate_indexes[0]
-            if len(generate_indexes) != 1:
-                errors.append("answering_plan_requires_single_generation")
-            if len(audit_indexes) != 1:
-                errors.append("answering_plan_requires_single_citation_audit")
-            if not retrieves:
+            generate_index = skills.index("generate_report")
+            if not evidence_available:
                 errors.append("generation_without_evidence")
-            if not assesses:
-                errors.append("generation_without_evidence_gate")
-            elif skills.index("assess_evidence") > generate_index:
+            if assesses and skills.index("assess_evidence") > generate_index:
                 errors.append("evidence_gate_after_generation")
-            if not audits:
-                errors.append("generation_without_citation_audit")
-            elif skills.index("audit_claims") < generate_index:
-                errors.append("citation_audit_before_generation")
-            elif audit_indexes[-1] != len(skills) - 1:
-                errors.append("citation_audit_must_be_final_step")
+            if generate_index != len(skills) - 1:
+                errors.append("generate_report_must_be_final_skill")
 
         if task_type in {"qa", "comparison", "literature_review", "paper_comparison"}:
             if not generates:
                 errors.append("answering_plan_missing_generate_report")
-            if not audits:
-                errors.append("answering_plan_missing_audit_claims")
 
         if task_type == "claim_audit":
-            if not retrieves or not assesses or not audits:
-                errors.append("claim_audit_requires_evidence_gate_and_audit")
+            if not evidence_available or not audits:
+                errors.append("claim_audit_requires_evidence_and_audit")
+            if "analyze_claims" not in skills and not has_answer:
+                errors.append("claim_audit_requires_claim_analysis")
             if generates:
                 errors.append("claim_audit_must_not_generate_report")
-            if assesses and audits and skills.index("audit_claims") < skills.index(
-                "assess_evidence"
-            ):
-                errors.append("claim_audit_before_evidence_gate")
 
         if task_type == "audit":
             if not has_answer:
                 errors.append("audit_requires_answer_artifact")
-            if not retrieves:
+            if not evidence_available:
                 errors.append("audit_requires_evidence")
             if not audits:
                 errors.append("audit_plan_missing_audit_claims")

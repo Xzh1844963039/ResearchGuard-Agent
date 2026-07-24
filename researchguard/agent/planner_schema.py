@@ -144,7 +144,7 @@ class StructuredPlan:
             required={
                 "task_type",
                 "goal",
-                "steps",
+                "skills",
                 "budget",
                 "reasoning_summary",
                 "planner_version",
@@ -152,11 +152,11 @@ class StructuredPlan:
             optional={"schema_version"},
             label="structured plan",
         )
-        raw_steps = value["steps"]
+        raw_steps = value["skills"]
         if not isinstance(raw_steps, list):
-            raise PlanSchemaError("Plan steps must be a list.")
+            raise PlanSchemaError("Plan skills must be a list.")
         if any(not isinstance(item, Mapping) for item in raw_steps):
-            raise PlanSchemaError("Every plan step must be an object.")
+            raise PlanSchemaError("Every plan skill must be an object.")
         raw_budget = value["budget"]
         if not isinstance(raw_budget, Mapping):
             raise PlanSchemaError("Plan budget must be an object.")
@@ -183,7 +183,7 @@ class StructuredPlan:
             "schema_version": self.schema_version,
             "task_type": self.task_type,
             "goal": self.goal,
-            "steps": [step.to_dict() for step in self.steps],
+            "skills": [step.to_dict() for step in self.steps],
             "budget": self.budget.to_dict(),
             "reasoning_summary": self.reasoning_summary,
             "planner_version": self.planner_version,

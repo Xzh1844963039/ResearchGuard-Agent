@@ -22,6 +22,7 @@ class AgentTrace:
     plan_revisions: tuple[Mapping[str, Any], ...]
     workflow_name: str | None
     workflow_steps: tuple[Mapping[str, Any], ...]
+    skill_calls: tuple[Mapping[str, Any], ...]
     tool_calls: tuple[Mapping[str, Any], ...]
     observations: tuple[Mapping[str, Any], ...]
     evidence: tuple[Mapping[str, Any], ...]
@@ -58,6 +59,7 @@ class AgentTrace:
             "plan_revisions": copy.deepcopy(list(self.plan_revisions)),
             "workflow_name": self.workflow_name,
             "workflow_steps": copy.deepcopy(list(self.workflow_steps)),
+            "skill_calls": copy.deepcopy(list(self.skill_calls)),
             "tool_calls": copy.deepcopy(list(self.tool_calls)),
             "observations": copy.deepcopy(list(self.observations)),
             "evidence": copy.deepcopy(list(self.evidence)),

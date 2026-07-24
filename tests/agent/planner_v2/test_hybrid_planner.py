@@ -105,7 +105,7 @@ def valid_payload() -> dict[str, object]:
     return {
         "task_type": "qa",
         "goal": "Explain CRAG with canonical evidence.",
-        "steps": [
+        "skills": [
             {
                 "skill": "retrieve_evidence",
                 "purpose": "Retrieve local evidence.",
@@ -113,22 +113,10 @@ def valid_payload() -> dict[str, object]:
                 "max_retry": 1,
             },
             {
-                "skill": "assess_evidence",
-                "purpose": "Assess the exact bundle.",
-                "expected_observation": "GateDecision",
-                "max_retry": 1,
-            },
-            {
                 "skill": "generate_report",
-                "purpose": "Generate through the guarded answer tool.",
-                "expected_observation": "AnswerArtifact",
+                "purpose": "Generate and audit through protected tools.",
+                "expected_observation": "GroundedReport",
                 "max_retry": 0,
-            },
-            {
-                "skill": "audit_claims",
-                "purpose": "Audit the generated claims.",
-                "expected_observation": "CitationAuditResult",
-                "max_retry": 1,
             },
         ],
         "budget": {
@@ -228,14 +216,12 @@ class HybridPlannerTests(unittest.TestCase):
 
         self.assertEqual(outcome.mode, "hybrid_llm")
         self.assertFalse(outcome.fallback_used)
-        self.assertEqual(outcome.structured_plan.steps[2].skill, "generate_report")
+        self.assertEqual(outcome.structured_plan.steps[1].skill, "generate_report")
         self.assertEqual(
-            [step.tool for step in outcome.executable_plan.steps],
+            [step.skill for step in outcome.executable_plan.steps],
             [
                 "retrieve_evidence",
-                "assess_evidence",
-                "generate_grounded_answer",
-                "audit_answer",
+                "generate_report",
             ],
         )
         self.assertEqual(outcome.api_call_count, 1)
@@ -266,9 +252,9 @@ class HybridPlannerTests(unittest.TestCase):
 
     def test_unknown_skill_is_rejected_and_falls_back(self) -> None:
         payload = valid_payload()
-        payload["steps"] = list(payload["steps"])
-        payload["steps"][0] = {
-            **payload["steps"][0],
+        payload["skills"] = list(payload["skills"])
+        payload["skills"][0] = {
+            **payload["skills"][0],
             "skill": "invent_evidence",
         }
         outcome = planner_for(payload).generate_plan("How does CRAG work?")
@@ -289,26 +275,31 @@ class HybridPlannerTests(unittest.TestCase):
 
     def test_plan_cannot_bypass_evidence_gate(self) -> None:
         payload = valid_payload()
-        payload["steps"] = [
-            payload["steps"][2],
-            payload["steps"][3],
-        ]
+        payload["skills"] = [payload["skills"][1]]
         outcome = planner_for(payload).generate_plan("How does CRAG work?")
 
         self.assertTrue(outcome.fallback_used)
-        self.assertIn("generation_without_evidence_gate", outcome.fallback_reason or "")
+        self.assertIn(
+            "generate_report_without_evidence",
+            outcome.fallback_reason or "",
+        )
 
     def test_plan_cannot_generate_again_after_citation_audit(self) -> None:
         payload = valid_payload()
-        payload["steps"] = [
-            *payload["steps"],
-            payload["steps"][2],
+        payload["skills"] = [
+            *payload["skills"],
+            {
+                "skill": "analyze_claims",
+                "purpose": "Attempt work after final report.",
+                "expected_observation": "StructuredClaims",
+                "max_retry": 0,
+            },
         ]
         outcome = planner_for(payload).generate_plan("How does CRAG work?")
 
         self.assertTrue(outcome.fallback_used)
         self.assertIn(
-            "answering_plan_requires_single_generation",
+            "generate_report_must_be_final_skill",
             outcome.fallback_reason or "",
         )
 
@@ -326,7 +317,7 @@ class HybridPlannerTests(unittest.TestCase):
         self.assertEqual(state.status, "completed")
         self.assertEqual(state.planner_metadata["mode"], "test_interface")
         self.assertEqual(
-            state.planner_plan["steps"][0]["skill"],
+            state.planner_plan["skills"][0]["skill"],
             "search_scholarly_sources",
         )
         self.assertEqual(state.tool_history[0]["tool_name"], "search_scholarly_sources")
@@ -339,14 +330,12 @@ class HybridPlannerTests(unittest.TestCase):
             [step.skill for step in outcome.structured_plan.steps],
             [
                 "retrieve_evidence",
-                "assess_evidence",
                 "generate_report",
-                "audit_claims",
             ],
         )
         self.assertEqual(
             [step.max_retry for step in outcome.executable_plan.steps],
-            [1, 1, 0, 1],
+            [1, 0],
         )
 
     def test_plan_revision_records_structured_error_observation(self) -> None:

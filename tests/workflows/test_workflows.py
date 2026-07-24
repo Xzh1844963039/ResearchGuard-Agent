@@ -290,6 +290,19 @@ class WorkflowTests(unittest.TestCase):
         serialized = json.dumps(workflows.specs())
         self.assertIn("required_tools", serialized)
         self.assertIn("researchguard.workflow_spec.v1", serialized)
+        templates = {
+            item["workflow_name"]: item["skill_template"]
+            for item in workflows.specs()
+        }
+        self.assertEqual(
+            templates["literature_review"],
+            [
+                "search_papers",
+                "retrieve_evidence",
+                "analyze_claims",
+                "generate_report",
+            ],
+        )
 
     def test_literature_review_keeps_candidate_metadata_out_of_evidence(self) -> None:
         registry, tools = make_registry()
@@ -420,7 +433,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn(EVIDENCE_A["chunk_id"], citation_ids)
         self.assertEqual(result.output["citations"][0]["page"], EVIDENCE_A["page"])
 
-    def test_planner_and_controller_select_workflow_without_internal_steps(self) -> None:
+    def test_planner_and_controller_execute_workflow_skill_template(self) -> None:
         registry, _ = make_registry()
         workflows = build_default_workflow_registry(registry)
         planner = BoundedPlanner(registry, workflow_names=workflows.names)
@@ -454,10 +467,18 @@ class WorkflowTests(unittest.TestCase):
 
         self.assertEqual(state.status, "completed")
         self.assertEqual(state.workflow_name, "paper_comparison")
-        self.assertEqual(state.plan, [])
+        self.assertEqual(
+            [step["skill"] for step in state.plan],
+            [
+                "search_papers",
+                "retrieve_evidence",
+                "compare_evidence",
+                "generate_report",
+            ],
+        )
         self.assertEqual(state.workflow_result["status"], "success")
-        self.assertEqual(len(state.workflow_steps), 6)
-        self.assertEqual(state.current_step, 6)
+        self.assertEqual(len(state.workflow_steps), 4)
+        self.assertEqual(state.current_step, 4)
 
     def test_invalid_workflow_input_returns_structured_failure(self) -> None:
         registry, _ = make_registry()

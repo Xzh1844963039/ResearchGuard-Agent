@@ -48,6 +48,7 @@ class WorkflowSpec:
     input_schema: Mapping[str, Any]
     output_schema: Mapping[str, Any]
     version: str
+    skill_template: tuple[str, ...] = ()
     schema_version: str = WORKFLOW_SPEC_SCHEMA_VERSION
 
     def to_dict(self) -> dict[str, Any]:
@@ -59,6 +60,7 @@ class WorkflowSpec:
             "input_schema": copy.deepcopy(dict(self.input_schema)),
             "output_schema": copy.deepcopy(dict(self.output_schema)),
             "version": self.version,
+            "skill_template": list(self.skill_template),
         }
 
 
@@ -111,6 +113,7 @@ class ResearchWorkflow(ABC):
     required_tools: tuple[str, ...]
     input_schema: Mapping[str, Any]
     output_schema: Mapping[str, Any]
+    skill_template: tuple[str, ...] = ()
 
     def __init__(
         self,
@@ -135,6 +138,7 @@ class ResearchWorkflow(ABC):
             input_schema=self.input_schema,
             output_schema=self.output_schema,
             version=self.version,
+            skill_template=self.skill_template,
         )
 
     @abstractmethod

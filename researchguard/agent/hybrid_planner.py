@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Protocol
 
@@ -31,20 +31,11 @@ from researchguard.agent.planner_validator import (
 )
 from researchguard.agent.policy import AgentPolicy
 from researchguard.agent.state import utc_timestamp
-from researchguard.skills import SkillRegistry
+from researchguard.skills import SkillRegistry, TASK_SKILL_TEMPLATES
 from researchguard.tools import ToolRegistry
 
 
 DEFAULT_PLANNER_CONFIG = Path("configs/planner_v2.yaml")
-SKILL_TO_TOOL = {
-    "retrieve_evidence": "retrieve_evidence",
-    "search_scholarly_sources": "search_scholarly_sources",
-    "assess_evidence": "assess_evidence",
-    "generate_report": "generate_grounded_answer",
-    "audit_claims": "audit_answer",
-}
-
-
 @dataclass(frozen=True)
 class HybridPlannerSettings:
     enabled: bool
@@ -176,10 +167,12 @@ class OpenAIPlannerBackend:
         schema = self._json_schema(skills)
         instructions = (
             "You propose a bounded research plan; you do not execute tools and do not answer the query. "
-            "Use only the supplied skill names. Plans that generate a report must retrieve evidence, "
-            "assess the exact EvidenceBundle, generate through generate_report, and then use audit_claims. "
-            "search_scholarly_sources returns metadata only and cannot support an answer. "
-            "claim_audit must not generate a report. Keep reasoning_summary to one concise sentence; "
+            "Use only the supplied skill names. generate_report is a protected composite skill that "
+            "requires canonical evidence, enforces the Evidence Gate, generates through the guarded "
+            "Answer Tool, and completes Citation Audit before success. search_papers and "
+            "search_scholarly_sources return metadata only and cannot support an answer. "
+            "claim_audit must use audit_claims and must not generate a report. "
+            "Keep reasoning_summary to one concise sentence; "
             "do not reveal private chain-of-thought. Respect every supplied budget exactly or more strictly."
         )
         payload = {
@@ -238,7 +231,7 @@ class OpenAIPlannerBackend:
                     "enum": list(SUPPORTED_TASK_TYPES),
                 },
                 "goal": {"type": "string", "minLength": 1},
-                "steps": {
+                "skills": {
                     "type": "array",
                     "minItems": 1,
                     "maxItems": self.settings.max_steps,
@@ -280,7 +273,7 @@ class OpenAIPlannerBackend:
             "required": [
                 "task_type",
                 "goal",
-                "steps",
+                "skills",
                 "budget",
                 "reasoning_summary",
                 "planner_version",
@@ -324,7 +317,7 @@ class DeterministicPlanner:
         memory_context: Mapping[str, Any] | None = None,
     ) -> PlannerOutcome:
         started = time.perf_counter()
-        executable = self.legacy.create_plan(
+        legacy_plan = self.legacy.create_plan(
             query,
             task_type=task_type,
             has_evidence=has_evidence,
@@ -333,7 +326,7 @@ class DeterministicPlanner:
         )
         structured = self._structured_plan(
             query,
-            executable.task_type,
+            legacy_plan.task_type,
             has_evidence=has_evidence,
         )
         validation = self.validator.validate(
@@ -346,17 +339,11 @@ class DeterministicPlanner:
                 "Deterministic plan failed validation: "
                 + ", ".join(validation.errors)
             )
-        if executable.workflow is None:
-            executable = replace(
-                executable,
-                steps=tuple(
-                    replace(
-                        step,
-                        max_retry=structured.steps[index].max_retry,
-                    )
-                    for index, step in enumerate(executable.steps)
-                ),
-            )
+        executable = self._compile_skill_plan(
+            structured,
+            workflow=legacy_plan.workflow,
+            memory_context=memory_context,
+        )
         return PlannerOutcome(
             structured_plan=structured,
             executable_plan=executable,
@@ -378,38 +365,7 @@ class DeterministicPlanner:
         has_evidence: bool,
     ) -> StructuredPlan:
         templates = {
-            "qa": (
-                "retrieve_evidence",
-                "assess_evidence",
-                "generate_report",
-                "audit_claims",
-            ),
-            "comparison": (
-                "retrieve_evidence",
-                "assess_evidence",
-                "generate_report",
-                "audit_claims",
-            ),
-            "literature_search": ("search_scholarly_sources",),
-            "literature_review": (
-                "search_scholarly_sources",
-                "retrieve_evidence",
-                "assess_evidence",
-                "generate_report",
-                "audit_claims",
-            ),
-            "paper_comparison": (
-                "search_scholarly_sources",
-                "compare_evidence",
-                "assess_evidence",
-                "generate_report",
-                "audit_claims",
-            ),
-            "claim_audit": (
-                "retrieve_evidence",
-                "assess_evidence",
-                "audit_claims",
-            ),
+            **TASK_SKILL_TEMPLATES,
             "audit": (
                 ("audit_claims",)
                 if has_evidence
@@ -423,9 +379,7 @@ class DeterministicPlanner:
                 purpose=self.skills.get(name).description,
                 expected_observation=self.skills.get(name).output_type,
                 max_retry=(
-                    0
-                    if name == "generate_report"
-                    else min(1, self.policy.max_retry)
+                    0 if name == "generate_report" else min(1, self.policy.max_retry)
                 ),
             )
             for name in names
@@ -444,6 +398,32 @@ class DeterministicPlanner:
                 "Use the smallest deterministic evidence-first plan for the selected task."
             ),
             planner_version=self.version,
+        )
+
+    @staticmethod
+    def _compile_skill_plan(
+        plan: StructuredPlan,
+        *,
+        workflow: str | None,
+        memory_context: Mapping[str, Any] | None,
+    ) -> AgentPlan:
+        steps = tuple(
+            PlanStep(
+                step_id=index,
+                tool="",
+                skill=step.skill,
+                purpose=step.purpose,
+                optional=False,
+                max_retry=step.max_retry,
+            )
+            for index, step in enumerate(plan.steps, start=1)
+        )
+        return AgentPlan(
+            task_type=plan.task_type,
+            steps=steps,
+            created_at=utc_timestamp(),
+            workflow=workflow,
+            memory_context=BoundedPlanner._advisory_memory(memory_context),
         )
 
 
@@ -577,43 +557,14 @@ class HybridPlanner:
         has_evidence: bool,
         memory_context: Mapping[str, Any] | None,
     ) -> AgentPlan:
+        del has_evidence
         workflow = WORKFLOW_TASK_TYPES.get(plan.task_type)
-        if workflow is not None:
-            if workflow not in self.workflow_names:
-                raise PlannerError(f"Workflow is not registered: {workflow}")
-            steps: tuple[PlanStep, ...] = ()
-        else:
-            executable: list[PlanStep] = []
-            for index, step in enumerate(plan.steps, start=1):
-                if step.skill == "compare_evidence":
-                    raise PlannerError(
-                        "compare_evidence is only executable through paper_comparison."
-                    )
-                tool = SKILL_TO_TOOL.get(step.skill)
-                if tool is None:
-                    raise PlannerError(f"No execution adapter for skill: {step.skill}")
-                if (
-                    plan.task_type == "audit"
-                    and has_evidence
-                    and step.skill == "retrieve_evidence"
-                ):
-                    continue
-                executable.append(
-                    PlanStep(
-                        step_id=len(executable) + 1,
-                        tool=tool,
-                        purpose=step.purpose,
-                        optional=False,
-                        max_retry=step.max_retry,
-                    )
-                )
-            steps = tuple(executable)
-        return AgentPlan(
-            task_type=plan.task_type,
-            steps=steps,
-            created_at=utc_timestamp(),
+        if workflow is not None and workflow not in self.workflow_names:
+            raise PlannerError(f"Workflow is not registered: {workflow}")
+        return DeterministicPlanner._compile_skill_plan(
+            plan,
             workflow=workflow,
-            memory_context=BoundedPlanner._advisory_memory(memory_context),
+            memory_context=memory_context,
         )
 
     def _fallback(

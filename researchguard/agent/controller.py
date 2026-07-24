@@ -24,7 +24,13 @@ from researchguard.agent.policy import AgentPolicy
 from researchguard.agent.replanner import BoundedReplanner
 from researchguard.agent.state import ResearchAgentState, utc_timestamp
 from researchguard.memory import DEFAULT_MEMORY_ROOT, ResearchMemory
-from researchguard.skills import SkillRegistry, build_default_skill_registry
+from researchguard.skills import (
+    SkillContext,
+    SkillExecutor,
+    SkillRegistry,
+    SkillResult,
+    build_default_skill_registry,
+)
 from researchguard.tools import (
     EvidenceBundle,
     EvidenceRecord,
@@ -64,6 +70,7 @@ class BoundedResearchAgentController:
         self.skill_registry = skill_registry or build_default_skill_registry(
             self.registry
         )
+        self.skill_executor = SkillExecutor(self.skill_registry)
         self.memory = memory if memory is not None else (
             ResearchMemory(memory_root) if memory_enabled else None
         )
@@ -170,7 +177,7 @@ class BoundedResearchAgentController:
         if plan_error:
             state.set_status("failed", plan_error)
             return state
-        if state.workflow_name:
+        if state.workflow_name and not state.plan:
             return self.execute_workflow(state)
         return self.execute(state)
 
@@ -283,7 +290,7 @@ class BoundedResearchAgentController:
     def resume(self, state: ResearchAgentState) -> ResearchAgentState:
         if state.status in {"completed", "rejected", "failed"}:
             return state
-        if state.workflow_name:
+        if state.workflow_name and not state.plan:
             return self._finalize_memory(self.execute_workflow(state))
         if not state.plan:
             state.set_status("failed", "missing_plan")
@@ -350,6 +357,8 @@ class BoundedResearchAgentController:
         return state
 
     def execute(self, state: ResearchAgentState) -> ResearchAgentState:
+        if state.plan and any(step.get("skill") for step in state.plan):
+            return self.execute_skills(state)
         started = time.perf_counter()
         state.set_status("running")
 
@@ -463,6 +472,296 @@ class BoundedResearchAgentController:
             state.touch()
 
         state.set_status("completed")
+        return state
+
+    def execute_skills(self, state: ResearchAgentState) -> ResearchAgentState:
+        started = time.perf_counter()
+        state.set_status("running")
+
+        while state.current_step < len(state.plan):
+            stop_reason = self.policy.stop_reason(
+                state,
+                elapsed_seconds=time.perf_counter() - started,
+            )
+            if stop_reason:
+                return self._finish_skill_execution(state, "failed", stop_reason)
+
+            step = state.plan[state.current_step]
+            skill_name = str(step.get("skill", "")).strip()
+            if skill_name not in self.skill_registry.names:
+                return self._finish_skill_execution(
+                    state,
+                    "failed",
+                    f"unregistered_skill: {skill_name or 'missing'}",
+                )
+            try:
+                skill_input = self._build_skill_input(skill_name, state, step)
+            except (TypeError, ValueError) as exc:
+                return self._finish_skill_execution(
+                    state,
+                    "failed",
+                    f"invalid_skill_input: {exc}",
+                )
+            context = SkillContext(
+                query=state.query,
+                task_type=state.task_type,
+                state=state,
+                inputs=skill_input,
+                invoke_tool=lambda name, values: self._invoke_skill_tool(
+                    state,
+                    name,
+                    values,
+                ),
+            )
+            result = self.skill_executor.execute(skill_name, context)
+            self._record_skill_result(state, skill_input, result)
+            try:
+                self._apply_skill_result(state, result)
+            except (TypeError, ValueError) as exc:
+                state.observations[-1]["output_validation_error"] = {
+                    "exception_type": type(exc).__name__,
+                    "message": str(exc),
+                }
+                return self._finish_skill_execution(
+                    state,
+                    "failed",
+                    "invalid_skill_output",
+                )
+
+            if time.perf_counter() - started >= self.policy.timeout:
+                return self._finish_skill_execution(
+                    state,
+                    "failed",
+                    "timeout_exceeded",
+                )
+
+            revision = self.replanner.revise_skill(
+                state,
+                skill_name=skill_name,
+                result=result,
+                available_skills=self.skill_registry.names,
+            )
+            if revision is not None:
+                state.plan_revisions.append(revision.to_dict())
+                state.plan = copy.deepcopy(list(revision.new_plan))
+                state.current_step += 1
+                state.retry_counts.clear()
+                state.touch()
+                plan_error = self.policy.validate_plan(state)
+                if plan_error:
+                    return self._finish_skill_execution(
+                        state,
+                        "failed",
+                        plan_error,
+                    )
+                continue
+
+            if result.status == "failed":
+                retry_key = str(state.current_step)
+                retry_count = state.retry_counts.get(retry_key, 0)
+                retry_limit = min(
+                    self.policy.max_retry,
+                    max(0, int(step.get("max_retry", 0) or 0)),
+                )
+                retryable = bool(result.output.get("retryable", False))
+                if retryable and retry_count < retry_limit:
+                    state.retry_counts[retry_key] = retry_count + 1
+                    state.touch()
+                    continue
+                return self._finish_skill_execution(
+                    state,
+                    "failed",
+                    result.reason or "skill_error",
+                )
+
+            if result.status == "rejected":
+                return self._finish_skill_execution(
+                    state,
+                    "rejected",
+                    self._skill_rejection_reason(skill_name, result),
+                )
+
+            if bool(step.get("recovery_terminal", False)):
+                state.current_step += 1
+                return self._finish_skill_execution(
+                    state,
+                    "rejected",
+                    "no_corpus_evidence_scholarly_candidates_only",
+                )
+
+            state.retry_counts.pop(str(state.current_step), None)
+            state.current_step += 1
+            state.touch()
+
+        return self._finish_skill_execution(state, "completed", None)
+
+    def _build_skill_input(
+        self,
+        skill_name: str,
+        state: ResearchAgentState,
+        step: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        parameters = copy.deepcopy(dict(step.get("parameters", {}) or {}))
+        if skill_name in {"search_papers", "search_scholarly_sources"}:
+            return {
+                "query": state.query,
+                "limit": parameters.get(
+                    "limit",
+                    state.workflow_input.get("candidate_limit", 5),
+                ),
+                "sources": parameters.get(
+                    "sources",
+                    state.workflow_input.get("sources"),
+                ),
+            }
+        if skill_name == "retrieve_evidence":
+            return {
+                "query": state.query,
+                "papers": state.workflow_input.get("papers"),
+                **parameters,
+            }
+        if skill_name in {
+            "assess_evidence",
+            "analyze_claims",
+            "compare_evidence",
+            "audit_claims",
+            "generate_report",
+        }:
+            if not state.evidence_bundle:
+                raise ValueError(f"{skill_name} requires an EvidenceBundle.")
+            return {
+                "evidence_bundle": copy.deepcopy(state.evidence_bundle),
+                "gate_decision": copy.deepcopy(state.gate_decision),
+                "claims": copy.deepcopy(
+                    state.skill_outputs.get("analyze_claims", {}).get(
+                        "claims", []
+                    )
+                ),
+                **parameters,
+            }
+        raise ValueError(f"No input adapter exists for skill: {skill_name}")
+
+    def _invoke_skill_tool(
+        self,
+        state: ResearchAgentState,
+        tool_name: str,
+        tool_input: Mapping[str, Any],
+    ) -> ToolResult:
+        try:
+            result = self.registry.invoke(tool_name, **dict(tool_input))
+        except Exception as exc:
+            result = ToolResult.create(
+                status="failed",
+                message="Registered skill tool raised an unhandled exception.",
+                reason="unhandled_tool_exception",
+                tool_name=tool_name,
+                tool_version=self.registry.version,
+                latency_ms=0.0,
+                error=ToolError(
+                    code="unhandled_tool_exception",
+                    category="execution_failure",
+                    message=str(exc),
+                    retryable=False,
+                    details={"exception_type": type(exc).__name__},
+                ),
+            )
+        self._record_tool_result(state, tool_name, tool_input, result)
+        self._apply_result(state, tool_name, result)
+        return result
+
+    def _record_skill_result(
+        self,
+        state: ResearchAgentState,
+        skill_input: Mapping[str, Any],
+        result: SkillResult,
+    ) -> None:
+        record = {
+            "skill_name": result.skill_name,
+            "input_summary": self._input_summary(skill_input),
+            "output_status": result.status,
+            "latency_ms": result.latency_ms,
+            "timestamp": result.timestamp,
+            "trace_id": result.trace_id,
+            "reason": result.reason,
+            "evidence_count": len(result.evidence),
+        }
+        state.skill_history.append(record)
+        state.workflow_steps.append(
+            {
+                "step": len(state.workflow_steps) + 1,
+                **copy.deepcopy(record),
+            }
+        )
+        state.observations.append(
+            {
+                "skill_name": result.skill_name,
+                "status": result.status,
+                "reason": result.reason,
+                "trace_id": result.trace_id,
+                "output": copy.deepcopy(dict(result.output)),
+                "evidence_count": len(result.evidence),
+            }
+        )
+        state.touch()
+
+    def _apply_skill_result(
+        self,
+        state: ResearchAgentState,
+        result: SkillResult,
+    ) -> None:
+        output = result.output
+        state.skill_outputs[result.skill_name] = copy.deepcopy(dict(output))
+        raw_evidence = output.get("evidence")
+        if isinstance(raw_evidence, list):
+            state.evidence = self._serialize_evidence(raw_evidence)
+        raw_bundle = output.get("evidence_bundle")
+        if isinstance(raw_bundle, Mapping):
+            bundle = EvidenceBundle.from_mapping(raw_bundle)
+            state.evidence_bundle = bundle.to_dict()
+            state.evidence = [
+                record.to_dict() for record in bundle.evidence_records
+            ]
+            state.gate_decision = None
+            state.answer = None
+            state.audit_result = None
+        candidates = output.get("candidate_papers")
+        if isinstance(candidates, list):
+            state.candidate_papers = self._serialize_candidate_papers(candidates)
+        gate = output.get("gate_decision")
+        if isinstance(gate, Mapping):
+            state.gate_decision = GateDecision.from_mapping(gate).to_dict()
+        answer = output.get("answer", output.get("answer_artifact"))
+        if isinstance(answer, Mapping):
+            state.answer = copy.deepcopy(dict(answer))
+        audit = output.get("audit")
+        if isinstance(audit, Mapping):
+            state.audit_result = copy.deepcopy(dict(audit))
+        state.touch()
+
+    def _finish_skill_execution(
+        self,
+        state: ResearchAgentState,
+        status: str,
+        reason: str | None,
+    ) -> ResearchAgentState:
+        state.set_status(status, reason)
+        if state.workflow_name:
+            answer = state.answer if isinstance(state.answer, Mapping) else {}
+            state.workflow_result = {
+                "schema_version": "researchguard.skill_workflow_result.v1",
+                "workflow_name": state.workflow_name,
+                "status": "success" if status == "completed" else status,
+                "reason": reason,
+                "output": {
+                    "summary": answer.get("answer"),
+                    "citations": copy.deepcopy(answer.get("citations", [])),
+                    "audit_result": copy.deepcopy(state.audit_result),
+                    "evidence": copy.deepcopy(state.evidence),
+                    "candidate_papers": copy.deepcopy(state.candidate_papers),
+                    "skill_outputs": copy.deepcopy(state.skill_outputs),
+                },
+                "trace": copy.deepcopy(state.skill_history),
+            }
         return state
 
     def _build_tool_input(
@@ -741,3 +1040,18 @@ class BoundedResearchAgentController:
         if tool_name == "audit_answer":
             return "answer_not_grounded"
         return result.reason or "tool_rejected"
+
+    @staticmethod
+    def _skill_rejection_reason(
+        skill_name: str,
+        result: SkillResult,
+    ) -> str:
+        if result.reason == "insufficient_evidence":
+            return "insufficient_evidence"
+        if skill_name == "generate_report":
+            return result.reason or "answer_not_grounded"
+        if skill_name == "audit_claims":
+            return result.reason or "claim_not_grounded"
+        if skill_name == "compare_evidence":
+            return result.reason or "insufficient_comparison_evidence"
+        return result.reason or "skill_rejected"

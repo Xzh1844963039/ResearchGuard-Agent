@@ -21,7 +21,7 @@ class AgentTraceTests(unittest.TestCase):
             planner_plan={
                 "schema_version": "researchguard.structured_plan.v1",
                 "task_type": "paper_comparison",
-                "steps": [{"skill": "compare_evidence"}],
+                "skills": [{"skill": "compare_evidence"}],
             },
             planner_metadata={
                 "mode": "hybrid_llm",
@@ -73,7 +73,7 @@ class AgentTraceTests(unittest.TestCase):
 
         self.assertEqual(payload["query"], state.query)
         self.assertEqual(
-            payload["planner_plan"]["steps"][0]["skill"],
+            payload["planner_plan"]["skills"][0]["skill"],
             "compare_evidence",
         )
         self.assertEqual(payload["planner_metadata"]["mode"], "hybrid_llm")

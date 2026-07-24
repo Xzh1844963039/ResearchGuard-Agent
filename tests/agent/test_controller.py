@@ -376,7 +376,10 @@ class ControllerTests(unittest.TestCase):
         )
 
         self.assertEqual(state.status, "completed")
-        self.assertEqual([entry["tool_name"] for entry in state.tool_history], ["audit_answer"])
+        self.assertEqual(
+            [entry["tool_name"] for entry in state.tool_history],
+            ["assess_evidence", "audit_answer"],
+        )
         self.assertEqual(tools["retrieve_evidence"].call_count, 0)
         self.assertEqual(tools["audit_answer"].call_count, 1)
 

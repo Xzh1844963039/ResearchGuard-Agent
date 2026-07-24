@@ -41,6 +41,11 @@ class ClaimAuditWorkflow(ResearchWorkflow):
     version = "1.0.0"
     description = "Retrieve evidence and verify a user-supplied claim without generating a new answer."
     required_tools = ("retrieve_evidence", "assess_evidence", "audit_answer")
+    skill_template = (
+        "retrieve_evidence",
+        "analyze_claims",
+        "audit_claims",
+    )
     input_schema = {"claim": "optional claim override; defaults to state.query"}
     output_schema = {
         "type": "ClaimAuditResult",

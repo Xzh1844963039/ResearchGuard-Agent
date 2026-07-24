@@ -6,7 +6,7 @@
 
 ResearchGuard 是一个面向科研论文的多文档 RAG 工程。它不止返回与问题相似的段落，而是把版面解析、section-aware chunking、混合检索、Cross-Encoder 精排、查询改写、证据充分性判断、受证据约束的回答生成和逐 claim 引用核验串成一条可审计流程。
 
-当前 Evidence Engine 主流程已经完成本地集成与验证；v2 在其上增加了 Tool Facade、受约束的单 Agent Controller、Scholarly Discovery、Research Workflow Skills、Research Memory 与 Evidence Ledger、Agent Trace、Agent Evaluation、Agent Intelligence Upgrade v1，以及 Hybrid Planner + Dynamic Skill Registry v1。最新 Agent 路径使用单一 Evidence Artifact，允许 LLM 提议严格结构化计划，并由确定性 Policy Validator 与执行预算控制；Planner 不可用或计划非法时自动回退到原确定性 Planner。历史 Agent 和早期 Audit 代码仍保留用于兼容；历史 `MemoryStore` 也继续服务迁移代码，但不承担当前 Controller 的科研过程记忆。
+当前 Evidence Engine 主流程已经完成本地集成与验证；v2 在其上增加了 Tool Facade、受约束的单 Agent Controller、Scholarly Discovery、Research Workflow Skills、Research Memory 与 Evidence Ledger、Agent Trace、Agent Evaluation、Agent Intelligence Upgrade v1、Hybrid Planner，以及 **Dynamic Skill Composition Upgrade v1**。最新 Agent 路径使用单一 Evidence Artifact，允许 LLM 提议严格结构化的 skill plan，并由确定性 Policy Validator、Skill Executor 与执行预算共同控制；Planner 不可用或计划非法时自动回退到原确定性 Planner。历史 Agent 和早期 Audit 代码仍保留用于兼容；历史 `MemoryStore` 也继续服务迁移代码，但不承担当前 Controller 的科研过程记忆。
 
 ## Architecture
 
@@ -30,13 +30,13 @@ flowchart LR
 
 ## Agent-ready Architecture
 
-ResearchGuard v2 已完成 Evidence Contract、Tool Facade、Bounded Controller、Scholarly Discovery、Research Workflow Skills、Research Memory、Agent Evaluation，以及 **Agent Intelligence Upgrade v1**。升级没有改变 Parser、Chunking、Indexing、Retrieval 算法或统一 Evidence Pipeline，而是修正了 Agent 层的数据流、有限重规划与评测可信度。
+ResearchGuard v2 已完成 Evidence Contract、Tool Facade、Bounded Controller、Scholarly Discovery、Research Workflow Skills、Research Memory、Agent Evaluation、Agent Intelligence Upgrade v1，以及 **Dynamic Skill Composition Upgrade v1**。升级没有改变 Parser、Chunking、Indexing、Retrieval 算法或统一 Evidence Pipeline，而是在 Agent 层增加可验证、可执行、可追踪的 skill composition。
 
 ```mermaid
 flowchart TD
     Query["User Query"] --> Planner["Hybrid Planner"]
     Planner --> Validator["Planner Policy Validator"]
-    SkillRegistry["Dynamic Skill Registry"] --> Planner
+    SkillRegistry["Skill Registry"] --> Planner
     Validator --> Controller["Single-Agent Controller"]
     Planner -->|failure or invalid plan| Fallback["Deterministic Planner"]
     Fallback --> Validator
@@ -48,14 +48,10 @@ flowchart TD
     Memory --> RunStore["Run Store"]
     Memory --> Ledger["Evidence Ledger"]
     Memory --> FailureStore["Failure Store"]
-    Controller --> WorkflowRegistry["Workflow Registry"]
-    Controller --> Registry["Tool Registry"]
-    WorkflowRegistry --> Review["Literature Review"]
-    WorkflowRegistry --> Compare["Paper Comparison"]
-    WorkflowRegistry --> Claim["Claim Audit"]
-    Review --> Registry
-    Compare --> Registry
-    Claim --> Registry
+    Controller --> SkillExecutor["Skill Executor"]
+    SkillRegistry --> SkillExecutor
+    SkillExecutor --> Registry["Tool Registry"]
+    WorkflowTemplates["Workflow Skill Templates"] --> Planner
     Registry --> RetrievalTool["retrieve_evidence"]
     RetrievalTool --> Bundle["EvidenceBundle"]
     Bundle --> EvidenceTool["assess_evidence"]
@@ -72,7 +68,8 @@ flowchart TD
     AuditTool --> Core
     ScholarTool --> Candidates["Candidate Paper Metadata"]
     Generator --> Core
-    Controller --> Trace["Agent Trace"]
+    SkillExecutor --> Trace["Agent Trace"]
+    Controller --> Trace
     Trace --> Evaluation["Agent Evaluation"]
     Trace --> Demo["CLI / Streamlit Demo v2"]
 ```
@@ -117,13 +114,37 @@ Query
 → Controller
 ```
 
-- `researchguard/agent/planner_schema.py` 定义版本化 `StructuredPlan`、`StructuredPlanStep` 与 `PlanBudget`。计划必须包含 `task_type`、`goal`、`steps`、`budget`、`reasoning_summary` 和 `planner_version`；step 必须包含 `skill`、`purpose`、`expected_observation` 和 `max_retry`。未知字段、类型错误和未知 schema 均 fail closed。
+- `researchguard/agent/planner_schema.py` 定义版本化 `StructuredPlan`、`StructuredPlanStep` 与 `PlanBudget`。外部计划必须包含 `task_type`、`goal`、`skills`、`budget`、`reasoning_summary` 和 `planner_version`；每个 skill step 必须包含 `skill`、`purpose`、`expected_observation` 和 `max_retry`。未知字段、类型错误和未知 schema 均 fail closed。
 - `researchguard/agent/hybrid_planner.py` 定义统一 `PlannerInterface.generate_plan(query)`、OpenAI strict JSON backend、`HybridPlanner` 与兼容原有规则的 `DeterministicPlanner`。配置位于 `configs/planner_v2.yaml`，默认 `temperature=0`、`max_steps=6`，并记录 model、prompt version、latency、token 与 API call count。
 - `researchguard/agent/planner_validator.py` 独立验证 task type、skill/tool 是否存在、step/retry/tool-call/revision budget、Evidence Gate 顺序、受保护的 Answer Tool 和 Citation Audit。LLM 只提议计划，不能扩大 Controller policy。
-- `researchguard/skills/` 提供动态 `SkillRegistry` 和版本化 `SkillSpec`。当前注册 `retrieve_evidence`、`search_scholarly_sources`、`assess_evidence`、`compare_evidence`、`audit_claims`、`generate_report`；每个 skill 声明 required inputs、output type、allowed tools 和 risk level。Skill 是规划层能力描述，现有 Workflow 与 Tool Registry 保持兼容。
-- StructuredPlan 与 Planner metadata 同时进入 `ResearchAgentState` 和 `AgentTrace`。Evaluation 的 API call count 会分别统计 Planner 与 Tool 调用。
+- `researchguard/skills/` 提供动态 `SkillRegistry`、版本化 `SkillSpec/SkillResult` 和实际 `SkillExecutor`。默认注册 `search_papers`、兼容别名 `search_scholarly_sources`、`retrieve_evidence`、`assess_evidence`、`analyze_claims`、`compare_evidence`、`audit_claims` 与 `generate_report`。
+- StructuredPlan、Planner metadata、skill history 与 skill outputs 同时进入 `ResearchAgentState` 和 `AgentTrace`。Evaluation 的 API call count 会分别统计 Planner 与底层 Tool 调用。
 
 当前实现是 **bounded adaptive planner**，不是无限自治 Agent。`AgentPolicy` 仍限制 steps、Tool calls、retry、revision 和 timeout；`max_plan_revisions` 默认且最大为 `2`。LLM 不执行 Tool、不生成最终答案，也不能把 scholarly metadata 变成 canonical evidence。
+
+## Dynamic Skill Composition Architecture
+
+Phase 8 Round 2 将 Round 1 的“skill 目录”升级为真正可执行的组合层：
+
+```text
+StructuredPlan.skills
+→ PlannerValidator
+→ SkillRegistry
+→ SkillExecutor
+→ existing Tool Registry
+→ ResearchGuard Evidence Engine
+```
+
+- `researchguard/skills/base.py` 定义 `SkillSpec`、`SkillResult`、`SkillContext` 与 `ResearchSkill`。`SkillSpec` 声明 name、description、input/output schema、required tools、risk level 和 version；`SkillResult` 统一返回 status、output、canonical evidence、trace ID、latency、reason 和 timestamp，支持稳定 JSON 序列化。
+- `researchguard/skills/registry.py` 同时保存可供 Planner 枚举的 spec 与可供 Controller 执行的 runtime，不允许重复注册或执行未知 skill。
+- `researchguard/skills/executor.py` 在运行前后验证 required input 与 output schema；异常、未知 skill 和 schema 错误均转换为结构化失败，不让一次 skill 错误击穿 Controller。
+- `researchguard/skills/runtime.py` 只做输入适配、受控组合与结果整理。`retrieve_evidence`、`assess_evidence`、`search_papers` 等能力仍调用现有 Tool Facade，不重新实现 Retrieval、Reranker、Evidence Judge、Generation 或 Citation Audit。
+- `generate_report` 是受保护的复合 skill：必须先取得或执行 Evidence Gate，仅在 strong evidence 下调用 grounded generation，并在返回前完成 Citation Audit；partial/unsupported 不能生成报告。`audit_claims` 同样要求 canonical evidence 和 gate，不能把无 provenance 文本当成可审计证据。
+- `researchguard/skills/templates.py` 把 `literature_review`、`paper_comparison` 和 `claim_audit` 表达为有限 skill templates。原 `researchguard/workflows/` 实现仍保留用于 API 与迁移兼容，但默认 Planner/Controller 路径会把模板编译为动态 skill sequence。
+- `BoundedReplanner` 可以针对 retrieval miss、retrieval failure 或 partial evidence 替换后续 skill sequence；修订次数仍严格限制为 `0..2`，重复 skill/cycle、越过 budget、gate bypass、audit 后再次生成等计划都会被 Validator 拒绝。
+- 每次 skill 执行都记录 skill name、输入摘要、状态、latency 和 trace ID；skill 内部 Tool 调用继续保留原 Tool trace，因此可以同时看到“研究步骤”和“证据引擎调用”两层 provenance。
+
+当前 composition 是线性、受模板与策略约束的单 Agent 执行，不支持任意 DAG、并行 skill、动态代码生成或开放式自治循环。
 
 ## Bounded Single-Agent Controller
 
@@ -133,20 +154,18 @@ Phase 2 位于 `researchguard/agent/`：
 - `planner.py`：保留原确定性分类与计划生成，作为 Hybrid Planner 的 fallback 与兼容实现。
 - `replanner.py`：根据 retrieval miss、partial evidence 和 retrieval failure 生成版本化 `PlanRevision`，记录 previous plan、observation、new plan 与 reason。
 - `policy.py`：默认限制为 `max_steps=6`、`max_tool_calls=10`、`max_retry=2`、`max_plan_revisions=2`、`timeout=120s`。
-- `controller.py`：只依赖 Planner Interface，执行 `validated plan → registry tool/workflow → observation → state update → bounded replan/stop decision`；所有修订仍受 step、call、revision 和 timeout budget 约束。
+- `controller.py`：只依赖 Planner Interface，执行 `validated skill plan → SkillExecutor → Tool Registry → observation → state update → bounded replan/stop decision`；所有修订仍受 step、call、revision 和 timeout budget 约束。旧的 tool plan 与 Workflow 执行入口继续保留用于兼容。
 
-`qa` 的初始有限流程为：
+`qa` 的默认 skill plan 为：
 
 ```text
 retrieve_evidence
-→ assess_evidence
-→ generate_grounded_answer
-→ audit_answer
+→ generate_report
 ```
 
-如果 `assess_evidence` 返回 unsupported，Controller 立即拒绝且不会调用 Answer Tool。partial evidence 最多触发一次扩大 `top_k/candidate_k` 的 retrieval；第二次仍非 strong 时拒绝。`audit` 任务要求调用方提供带 citation provenance 的 answer artifact；如果没有现成 evidence，可以先执行一次 retrieval。
+`generate_report` 内部强制执行或复用 `assess_evidence → generate_grounded_answer → audit_answer`，因此 Planner 无法通过省略 gate 或 audit 绕过安全边界。如果 gate 返回 unsupported，skill 立即拒绝且不会调用 Answer Tool；partial evidence 可触发扩大 `top_k/candidate_k` 的 retrieval，达到 revision 上限后仍非 strong 则拒绝。`audit` 任务要求调用方提供带 citation provenance 的 answer artifact；如果没有现成 evidence，可以先执行一次 retrieval。
 
-每次 Tool 调用都会记录 `tool_name`、输入摘要、输出状态、latency、API call count、EvidenceBundle ID、timestamp 和 trace ID。Hybrid Planner 可调用 LLM 提议有限计划，但不进行开放式工具执行；项目也没有 Multi-Agent、LangGraph、autonomous browsing 或无限 ReAct loop。Research Memory 只向 Planner 提供受限的历史 run/paper/failure 摘要，不让历史答案改变当前答案。
+每次 Skill 调用都会记录 `skill_name`、输入摘要、输出状态、latency 和 trace ID；每次底层 Tool 调用继续记录 `tool_name`、输入摘要、输出状态、latency、API call count、EvidenceBundle ID、timestamp 和 trace ID。Hybrid Planner 可调用 LLM 提议有限计划，但不进行开放式工具执行；项目也没有 Multi-Agent、LangGraph、autonomous browsing 或无限 ReAct loop。Research Memory 只向 Planner 提供受限的历史 run/paper/failure 摘要，不让历史答案改变当前答案。
 
 ## Adaptive Agent Loop
 
@@ -194,7 +213,7 @@ metadata_only = true
 evidence_eligible = false
 ```
 
-它们不是 `EvidenceRecord`，没有 canonical chunk ID、page、section 或 parser provenance，不能传给 Answer Tool。Planner 对 `literature_search` 只生成一个 `search_scholarly_sources` step；Controller 将结果保存到 `candidate_papers` 后结束，不会继续生成回答。
+它们不是 `EvidenceRecord`，没有 canonical chunk ID、page、section 或 parser provenance，不能传给 Answer Tool。Planner 对 `literature_search` 只生成一个 `search_papers` skill；该 skill 调用兼容的 `search_scholarly_sources` Tool，Controller 将结果保存到 `candidate_papers` 后结束，不会继续生成回答。
 
 搜索缓存位于 `data/cache/scholarly_search_v1/`，cache key 包含 query、provider、config version 和 limit；缓存只保存请求、metadata response 与 timestamp，并被 Git 忽略。
 
@@ -202,22 +221,22 @@ evidence_eligible = false
 
 ## Research Workflow Skills
 
-Phase 4 在 `researchguard/workflows/` 增加科研任务编排层。Workflow 负责固定、可解释的任务顺序；Tool 负责单项能力执行；Evidence Engine 继续负责检索、充分性判断、生成和引用核验。Controller 只根据 Planner 输出的 workflow name 调用 `WorkflowRegistry`，不包含任何具体 workflow 的内部步骤。
+Phase 4 在 `researchguard/workflows/` 增加科研任务编排层；Phase 8 Round 2 将这三个 Workflow 保留为兼容实现，并为每个 Workflow 增加 `skill_template`。默认 Planner 根据 task/workflow 选择模板，Controller 再逐项执行 skill；Tool 仍负责原子能力，Evidence Engine 继续负责检索、充分性判断、生成和引用核验。
 
 统一抽象包括：
 
-- `ResearchWorkflow`：声明 `workflow_name`、description、required tools、input/output schema 和 `run(state)`。
+- `ResearchWorkflow`：声明 `workflow_name`、description、required tools、input/output schema、`skill_template` 和兼容的 `run(state)`。
 - `WorkflowResult`：记录 version、status、message/reason、结构化 output、完整 trace、起止时间和 latency，可直接序列化为 JSON。
 - `WorkflowLimits`：复用 Agent policy 的 step、tool call、retry 和 timeout 上限。
-- `WorkflowRegistry`：注册并运行 `literature_review`、`paper_comparison` 和 `claim_audit`。
+- `WorkflowRegistry`：保留 `literature_review`、`paper_comparison` 和 `claim_audit` 的旧调用入口；默认 Agent 路径使用对应的 skill template。
 
 当前支持三个有限工作流：
 
-| Workflow | 固定流程 | 输出 |
+| Workflow | 默认 Skill Template | 输出 |
 |---|---|---|
-| `literature_review` | scholarly search → corpus retrieval → evidence sufficiency → guarded answer → citation audit | candidate papers、canonical evidence、grounded summary、citations、audit、trace |
-| `paper_comparison` | identify papers → per-paper retrieval → evidence sufficiency → guarded comparison → citation audit | papers、dimensions、分离的 evidence table、summary、citations、audit、trace |
-| `claim_audit` | claim retrieval → evidence sufficiency → citation/claim audit | claim、support level、canonical evidence、citations、audit、trace |
+| `literature_review` | `search_papers → retrieve_evidence → analyze_claims → generate_report` | candidate papers、canonical evidence、grounded summary、citations、audit、trace |
+| `paper_comparison` | `search_papers → retrieve_evidence → compare_evidence → generate_report` | papers、dimensions、分离的 evidence table、summary、citations、audit、trace |
+| `claim_audit` | `retrieve_evidence → analyze_claims → audit_claims` | claim、support level、canonical evidence、citations、audit、trace |
 
 Literature Review 中的 scholarly records 始终保持 `metadata_only=true`，只作为候选列表；summary 只能引用当前本地 corpus 中带 canonical chunk/page/section provenance 的 `EvidenceRecord`。Paper Comparison 可由用户通过 workflow input 指定两篇论文的 name、`doc_id` 和比较维度；提供 `doc_id` 时两次 retrieval 分别使用 document filter，证据表不会混合。Claim Audit 不调用 Answer Generator，而是把用户 claim 与 Evidence Sufficiency 返回的 supporting chunk IDs 组成可审计 artifact，再交给现有 Citation Audit Tool。
 
@@ -273,7 +292,7 @@ Agent Evaluation 现在覆盖六类指标：
 | Memory | persistence success、ledger completeness、failure recording |
 | Agent Intelligence | replanning rate、successful recovery rate、average plan revision、duplicate Tool call rate、evidence reuse rate |
 
-`scripts/validate_agent_evaluation_v1.py` 保留三个旧 deterministic state-level cases，用于兼容 schema regression。正式 Agent 集成评测入口是 `scripts/validate_agent_benchmark_v2.py`：30 个 case 均从 query 开始执行真实 Planner、Controller、Workflow 和 Tool Registry，禁止直接构造最终 state。该 benchmark 仍使用 deterministic Tool doubles，因此验证的是 Agent 控制逻辑，不代表外部 LLM 或真实科研问题上的回答质量。
+`scripts/validate_agent_evaluation_v1.py` 保留三个旧 deterministic state-level cases，用于兼容 schema regression。正式 Agent 集成评测入口是 `scripts/validate_agent_benchmark_v2.py`：30 个 case 均从 query 开始执行 Planner、Controller、Skill/Workflow compatibility layer 和 Tool Registry，禁止直接构造最终 state。该 benchmark 仍使用 deterministic Tool doubles，因此验证的是 Agent 控制逻辑，不代表外部 LLM 或真实科研问题上的回答质量。
 
 ## Key Features
 
@@ -285,7 +304,7 @@ Agent Evaluation 现在覆盖六类指标：
 - **Grounded generation**：生成器只能使用 gate 选定的 evidence，并输出可回溯 citation。
 - **Citation audit**：将答案拆为 atomic claims，逐条核验支持程度和 citation provenance。
 - **Bounded single agent**：Hybrid LLM plan proposal、确定性校验与 fallback、Registry-only tool calling、可恢复 state 与 step/call/retry/revision/timeout 约束。
-- **Dynamic skill registry**：用版本化 SkillSpec 描述六项细粒度能力，并把规划层 skill 映射到现有受保护 Tool 或 Workflow。
+- **Dynamic skill composition**：用版本化 SkillSpec/SkillResult 描述并执行八个注册项，通过 schema、预算、gate 与 audit 规则校验动态 skill sequence，再映射到现有受保护 Tool。
 - **Scholarly discovery**：通过可扩展 Provider 发现 arXiv/OpenAlex 候选论文，同时隔离 metadata 与 answer evidence。
 - **Research workflow skills**：提供 Literature Review、Paper Comparison 和 Claim Audit 三个可解释、可审计的有限科研工作流。
 - **Research memory**：使用版本化 JSONL 保存 research run、证据 lineage 和失败记录，并支持关键词、workflow 与时间过滤。
@@ -301,8 +320,8 @@ researchguard/
   retrieval/       retrieval、rewrite、rerank、evidence、answer 与 citation audit
   tools/           Evidence contracts、Tool Facade 与 Registry
     scholarly/     arXiv/OpenAlex Provider abstraction 与 metadata cache
-  skills/          Dynamic Skill Registry 与版本化 SkillSpec
-  workflows/       Workflow contract、Registry 与三个科研工作流
+  skills/          Skill contract、Registry、Executor、runtime 与 Workflow templates
+  workflows/       兼容的 Workflow contract、Registry 与三个科研工作流
   memory/          Research Run Store、Evidence Ledger、Failure Store 与历史兼容 MemoryStore
   tracing/         版本化 Agent Trace、collector 与 CLI formatter
   evaluation/      Agent evaluation schema、adaptive metrics、evaluator 与 report renderer
@@ -500,7 +519,9 @@ Phase 6 synthetic benchmark 的 3 个 case 全部通过：task classification ac
 
 Agent Benchmark v2 的 30 个 integration cases 全部通过：task/workflow accuracy `1.0000`、plan revision accuracy `1.0000`、invalid Tool rate `0.0000`、duplicate Tool call rate `0.0000`、provenance validity `1.0000`、evidence reuse rate `1.0000`。12/30 case 发生重规划，平均 `0.4667` 次 revision；需要恢复的 case 中 `successful_recovery_rate=0.6667`，其余恢复路径按设计安全拒绝。Benchmark 包含 10 个 task routing、10 个 replanning 和 10 个 safety boundary case。
 
-Phase 8 planner_v2 新增 10 个定向测试，覆盖合法 strict JSON 与序列化、非法 JSON、Planner API 异常、未知 skill、超预算、Evidence Gate 绕过、审计后再次生成、Controller Planner Interface、deterministic fallback 与结构化 PlanRevision。当前全量 unittest 为 `96/96 PASS`；这些测试验证规划边界和 fallback 确定性，不代表 LLM 对开放科研任务的规划质量。
+Phase 8 Round 1 的 planner_v2 定向测试覆盖合法 strict JSON 与序列化、非法 JSON、Planner API 异常、未知 skill、超预算、Evidence Gate 绕过、审计后再次生成、Controller Planner Interface、deterministic fallback 与结构化 PlanRevision。Round 2 在 `tests/skills/` 增加 9 个测试，覆盖 Registry、SkillResult JSON、真实 skill execution、未知 skill、budget/cycle 拒绝、gate bypass、动态 Controller 路径与 skill-level replanning。当前全量 unittest 为 `105/105 PASS`。
+
+Round 2 回归同时通过 `validate_pipeline_v1.py`、`validate_retrieval_v1.py`、`validate_agent_evaluation_v1.py` 与 `validate_agent_benchmark_v2.py`。Agent Benchmark v2 仍为 30/30 PASS，task/workflow accuracy、plan revision accuracy、provenance validity 与 evidence reuse rate 均为 `1.0000`，duplicate Tool call rate 为 `0.0000`；这证明组合层没有破坏现有边界，不代表 LLM 对开放科研任务的规划质量。
 
 `.github/workflows/test.yml` 在 push 和 pull request 上安装 `pyproject.toml` 依赖，并运行 `python -m compileall researchguard` 与 `python -m unittest discover -s tests`。
 
@@ -518,7 +539,9 @@ Phase 8 planner_v2 新增 10 个定向测试，覆盖合法 strict JSON 与序�
 ## Limitations
 
 - Hybrid Planner 只负责一次受 schema 约束的 task understanding 与 plan proposal；当前没有多轮 LLM reflection。它的真实规划质量尚未在独立人工标注 hold-out 上评测，API 不可用时会退回确定性规则。
-- Dynamic Skill Registry 当前是规划能力目录；科研 Workflow 仍按既有固定内部步骤执行，不支持运行时合成任意新 workflow。
+- Dynamic Skill Composition 当前只支持经过 Registry 和 Validator 认可的线性 skill sequence；不支持任意 DAG、并行执行、运行时定义新 skill 或动态代码生成。
+- `analyze_claims` 当前是确定性的轻量 claim candidate 提取，用于提供可追踪中间产物，不等同于独立的语义 claim verification 模型。
+- `generate_report` 会在一个受保护 skill 内顺序执行 gate、generation 与 audit；当前没有事务式回滚，底层同步 API 仍依赖各 Tool 自身 timeout。
 - Replanner 根据 retrieval miss、partial evidence、retrieval failure 等已定义 observation 选择受控恢复路径，最多修订两次，不能为任意科研任务创造新策略。
 - `generate_grounded_answer` 已消除内部重复 retrieval/judge/audit，但同步 Answer Generator 仍依赖外部 API timeout，Controller 无法抢占正在执行的同步调用。
 - Literature Review 的外部候选 metadata 不会自动下载、解析或进入本地 corpus，因此只列出 discovery candidates；它不会扩大当前可回答证据范围。
@@ -553,11 +576,12 @@ Phase 8 planner_v2 新增 10 个定向测试，覆盖合法 strict JSON 与序�
 2. 在独立 hold-out corpus 上扩充 retrieval、answerability 和 citation audit 评测。
 3. 校准 Evidence Sufficiency，降低 false negatives，同时保持 fail-closed 行为。
 4. 将本地绝对路径迁移为可移植配置，并补充数据准备 manifest。
-5. 在独立真实 Agent/workflow hold-out 上运行 Hybrid Planner、真实 Retrieval、LLM Judge、Generation 与 Audit，扩展计划有效率、fallback 率、论文识别、恢复质量、成本和失败注入评测。
+5. 在独立真实 Agent/skill hold-out 上运行 Hybrid Planner、真实 Retrieval、LLM Judge、Generation 与 Audit，扩展 skill plan 有效率、fallback 率、论文识别、恢复质量、成本和失败注入评测。
 6. 为候选论文增加显式用户选择与受控 ingestion manifest，并建立 title/DOI 到 canonical `doc_id` 的映射，但仍禁止 metadata 直接进入回答生成。
 7. 根据真实 hold-out 的失败分布校准 bounded replanning 触发条件，避免无收益的重复 retrieval，同时维持最大两次 revision。
 8. 为 JSONL memory 增加归档、retention、完整性审计和多进程安全方案，再评估是否迁移 SQLite。
 9. 评估是否需要比 keyword advisory 更严格的短期 session context；在有 benchmark 前不引入用户画像、Multi-Agent 或开放式自治循环。
+10. 基于真实失败样本评估条件分支或有限并行是否有明确收益；在 provenance、预算和可重复性验证完成前，不把当前线性 Skill Executor 扩展为任意工作流引擎。
 10. 增加稳定 API、并发隔离、可观测性与部署方案。
 
 ## Development Documentation Rule
