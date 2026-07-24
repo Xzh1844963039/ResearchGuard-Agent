@@ -4,7 +4,7 @@ from __future__ import annotations
 import unittest
 
 from researchguard.retrieval.models import RetrievalHit
-from researchguard.tools.contracts import EvidenceRecord
+from researchguard.tools.contracts import EvidenceBundle, EvidenceRecord, GateDecision
 
 
 class EvidenceProvenanceTests(unittest.TestCase):
@@ -76,6 +76,41 @@ class EvidenceProvenanceTests(unittest.TestCase):
         self.assertEqual(payload["section"], "results")
         self.assertEqual(payload["provenance"]["source_block_ids"], ["p8-b4"])
         self.assertTrue(payload["provenance"]["has_table"])
+
+    def test_bundle_and_gate_preserve_canonical_provenance(self) -> None:
+        record = EvidenceRecord.from_mapping(
+            {
+                "chunk_id": "doc-2::chunk-3",
+                "doc_id": "doc-2",
+                "section": "results",
+                "page": 8,
+                "content": "Table 3 reports the main result.",
+                "source": "Paper Two",
+                "provenance": {"source_block_ids": ["p8-b4"]},
+            }
+        )
+        bundle = EvidenceBundle.create(
+            query="What does Table 3 report?",
+            evidence=[record],
+            retrieval_metadata={"mode": "hybrid"},
+        )
+        restored = EvidenceBundle.from_mapping(bundle.to_dict())
+        gate = GateDecision(
+            status="strong",
+            reason="direct support",
+            supporting_chunk_ids=(record.chunk_id,),
+            evidence_bundle_id=restored.bundle_id,
+            confidence=0.95,
+            answerable=True,
+        )
+
+        self.assertEqual(restored.bundle_id, bundle.bundle_id)
+        self.assertEqual(restored.evidence_records[0].page, 8)
+        self.assertEqual(
+            restored.evidence_records[0].provenance["source_block_ids"],
+            ["p8-b4"],
+        )
+        self.assertEqual(gate.evidence_bundle_id, bundle.bundle_id)
 
 
 if __name__ == "__main__":

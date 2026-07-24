@@ -75,19 +75,22 @@ class ClaimAuditWorkflow(ResearchWorkflow):
                     started_at,
                     started,
                 )
-            evidence = self._evidence_from_result(retrieval_result)
+            bundle = self._bundle_from_result(retrieval_result, query=claim)
+            evidence = [record.to_dict() for record in bundle.evidence_records]
             state.evidence = copy.deepcopy(evidence)
+            state.evidence_bundle = bundle.to_dict()
             assessment_result = self._invoke(
                 state,
                 trace,
                 started,
                 "assess_evidence",
-                query=claim,
-                evidence=evidence,
+                evidence_bundle=bundle.to_dict(),
             )
             assessment = assessment_result.data.get("assessment")
             assessment = dict(assessment) if isinstance(assessment, Mapping) else {}
-            support_level = str(assessment.get("support_level", "unknown"))
+            gate = self._gate_from_result(assessment_result, bundle=bundle)
+            state.gate_decision = gate.to_dict()
+            support_level = gate.status
             if assessment_result.status == "failed":
                 return self._failure(
                     assessment_result.reason or "tool_error",
@@ -101,8 +104,8 @@ class ClaimAuditWorkflow(ResearchWorkflow):
                 )
             if (
                 assessment_result.status == "rejected"
-                or support_level.casefold() != "strong"
-                or not bool(assessment.get("answerable", False))
+                or gate.status != "strong"
+                or not gate.answerable
             ):
                 return self._finish(
                     status="rejected",
@@ -121,11 +124,7 @@ class ClaimAuditWorkflow(ResearchWorkflow):
                     started=started,
                 )
 
-            supporting_ids = [
-                str(item)
-                for item in assessment.get("supporting_chunk_ids", [])
-                if str(item).strip()
-            ]
+            supporting_ids = list(gate.supporting_chunk_ids)
             evidence_by_id = {str(item["chunk_id"]): item for item in evidence}
             selected_ids = [item for item in supporting_ids if item in evidence_by_id]
             if not selected_ids:
@@ -168,7 +167,7 @@ class ClaimAuditWorkflow(ResearchWorkflow):
                 started,
                 "audit_answer",
                 answer=claim_artifact,
-                evidence=selected_evidence,
+                evidence_bundle=bundle.to_dict(),
             )
             audit = audit_result.data.get("audit")
             audit = dict(audit) if isinstance(audit, Mapping) else None

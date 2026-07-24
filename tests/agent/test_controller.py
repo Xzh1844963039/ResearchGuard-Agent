@@ -8,7 +8,14 @@ from collections.abc import Callable
 from researchguard.agent.controller import BoundedResearchAgentController
 from researchguard.agent.planner import AgentPlan, PlanStep
 from researchguard.agent.policy import AgentPolicy
-from researchguard.tools import ToolError, ToolRegistry, ToolResult, ToolSpec
+from researchguard.tools import (
+    EvidenceBundle,
+    GateDecision,
+    ToolError,
+    ToolRegistry,
+    ToolResult,
+    ToolSpec,
+)
 
 
 EVIDENCE = {
@@ -90,61 +97,87 @@ def _success(name: str, data: dict[str, object]) -> ToolResult:
     )
 
 
-def _grounded_pipeline_result() -> dict[str, object]:
-    retrieval_hit = {
-        **EVIDENCE,
-        "page_start": EVIDENCE["page"],
-        "text": EVIDENCE["content"],
-        "title": EVIDENCE["provenance"]["title"],
-    }
-    audit = {
-        "audit_completed": True,
-        "overall_grounded": True,
-        "claims": [],
-        "evidence_chunk_ids": ["paper-crag::chunk-7"],
-    }
-    return {
-        "final_status": "grounded",
-        "retrieval": {"output": {"hits": [retrieval_hit]}},
-        "answer_generation": {"output": ANSWER_ARTIFACT},
-        "citation_audit": {"output": audit},
-    }
+def _bundle(query: str) -> EvidenceBundle:
+    return EvidenceBundle.create(query=query, evidence=[EVIDENCE])
 
 
 def _complete_registry(*, unsupported: bool = False) -> tuple[ToolRegistry, dict[str, FakeTool]]:
     registry = ToolRegistry()
     tools: dict[str, FakeTool] = {}
-    tools["retrieve_evidence"] = FakeTool(
-        "retrieve_evidence",
-        lambda **_: _success("retrieve_evidence", {"evidence": [EVIDENCE]}),
-    )
+    def retrieve(**kwargs: object) -> ToolResult:
+        bundle = _bundle(str(kwargs["query"]))
+        return _success(
+            "retrieve_evidence",
+            {
+                "evidence": [EVIDENCE],
+                "evidence_bundle": bundle.to_dict(),
+            },
+        )
+
+    tools["retrieve_evidence"] = FakeTool("retrieve_evidence", retrieve)
     if unsupported:
-        tools["assess_evidence"] = FakeTool(
-            "assess_evidence",
-            lambda **_: ToolResult.create(
+        def unsupported_assessment(**kwargs: object) -> ToolResult:
+            bundle = EvidenceBundle.from_mapping(kwargs["evidence_bundle"])
+            assessment = {
+                "support_level": "unsupported",
+                "answerable": False,
+                "reason": "no support",
+                "supporting_chunk_ids": [],
+            }
+            gate = GateDecision.from_assessment(
+                evidence_bundle_id=bundle.bundle_id,
+                assessment=assessment,
+            )
+            return ToolResult.create(
                 status="rejected",
                 message="Evidence support level: unsupported.",
                 reason="no support",
                 tool_name="assess_evidence",
                 tool_version="test",
                 latency_ms=1,
-                data={"assessment": {"support_level": "unsupported", "answerable": False}},
-            ),
-        )
-    else:
+                data={"assessment": assessment, "gate_decision": gate.to_dict()},
+            )
+
         tools["assess_evidence"] = FakeTool(
             "assess_evidence",
-            lambda **_: _success(
-                "assess_evidence",
-                {"assessment": {"support_level": "strong", "answerable": True}},
-            ),
+            unsupported_assessment,
         )
+    else:
+        def strong_assessment(**kwargs: object) -> ToolResult:
+            bundle = EvidenceBundle.from_mapping(kwargs["evidence_bundle"])
+            assessment = {
+                "support_level": "strong",
+                "answerable": True,
+                "reason": "direct support",
+                "confidence": 0.95,
+                "supporting_chunk_ids": [EVIDENCE["chunk_id"]],
+            }
+            gate = GateDecision.from_assessment(
+                evidence_bundle_id=bundle.bundle_id,
+                assessment=assessment,
+            )
+            return _success(
+                "assess_evidence",
+                {"assessment": assessment, "gate_decision": gate.to_dict()},
+            )
+
+        tools["assess_evidence"] = FakeTool(
+            "assess_evidence",
+            strong_assessment,
+        )
+    def generate(**kwargs: object) -> ToolResult:
+        bundle = EvidenceBundle.from_mapping(kwargs["evidence_bundle"])
+        return _success(
+            "generate_grounded_answer",
+            {
+                "answer": ANSWER_ARTIFACT,
+                "evidence_bundle_id": bundle.bundle_id,
+            },
+        )
+
     tools["generate_grounded_answer"] = FakeTool(
         "generate_grounded_answer",
-        lambda **_: _success(
-            "generate_grounded_answer",
-            {"pipeline_result": _grounded_pipeline_result()},
-        ),
+        generate,
     )
     tools["audit_answer"] = FakeTool(
         "audit_answer",
@@ -176,6 +209,11 @@ class RepeatingPlanner:
             ),
             created_at="2026-01-01T00:00:00+00:00",
         )
+
+
+class NoReplanner:
+    def revise(self, *_: object, **__: object) -> None:
+        return None
 
 
 class ControllerTests(unittest.TestCase):
@@ -266,6 +304,7 @@ class ControllerTests(unittest.TestCase):
             registry=registry,
             planner=RepeatingPlanner(1),
             policy=AgentPolicy(max_steps=6, max_tool_calls=10, max_retry=2, timeout=10),
+            replanner=NoReplanner(),
             memory_enabled=False,
         )
 
@@ -290,6 +329,7 @@ class ControllerTests(unittest.TestCase):
         controller = BoundedResearchAgentController(
             registry=registry,
             planner=RepeatingPlanner(1),
+            replanner=NoReplanner(),
             memory_enabled=False,
         )
 

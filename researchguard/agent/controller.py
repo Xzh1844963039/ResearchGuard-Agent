@@ -8,10 +8,13 @@ from typing import Any, Iterable, Mapping
 
 from researchguard.agent.planner import BoundedPlanner, PlannerError
 from researchguard.agent.policy import AgentPolicy
+from researchguard.agent.replanner import BoundedReplanner
 from researchguard.agent.state import ResearchAgentState, utc_timestamp
 from researchguard.memory import DEFAULT_MEMORY_ROOT, ResearchMemory
 from researchguard.tools import (
+    EvidenceBundle,
     EvidenceRecord,
+    GateDecision,
     ScholarPaperRecord,
     ToolError,
     ToolRegistry,
@@ -32,6 +35,7 @@ class BoundedResearchAgentController:
         registry: ToolRegistry | None = None,
         workflow_registry: WorkflowRegistry | None = None,
         planner: Any | None = None,
+        replanner: Any | None = None,
         policy: AgentPolicy | None = None,
         memory: ResearchMemory | None = None,
         memory_enabled: bool = True,
@@ -68,6 +72,9 @@ class BoundedResearchAgentController:
             max_steps=self.policy.max_steps,
             workflow_names=self.workflow_registry.names,
         )
+        self.replanner = replanner or BoundedReplanner(
+            max_revisions=self.policy.max_plan_revisions,
+        )
 
     def run(
         self,
@@ -78,10 +85,11 @@ class BoundedResearchAgentController:
         evidence: Iterable[EvidenceRecord | Mapping[str, Any]] | None = None,
         workflow_input: Mapping[str, Any] | None = None,
     ) -> ResearchAgentState:
+        serialized_evidence = self._serialize_evidence(evidence or ())
         state = ResearchAgentState(
             query=query,
             answer=copy.deepcopy(dict(answer_artifact)) if answer_artifact is not None else None,
-            evidence=self._serialize_evidence(evidence or ()),
+            evidence=serialized_evidence,
             workflow_input=copy.deepcopy(dict(workflow_input or {})),
             memory_status={
                 "enabled": self.memory is not None,
@@ -90,6 +98,12 @@ class BoundedResearchAgentController:
                 "errors": [],
             },
         )
+        if serialized_evidence:
+            state.evidence_bundle = EvidenceBundle.create(
+                query=state.query,
+                evidence=serialized_evidence,
+                provenance={"source": "controller_supplied_evidence"},
+            ).to_dict()
         self._load_memory_context(state)
         self._start_memory(state)
         return self._finalize_memory(
@@ -230,7 +244,7 @@ class BoundedResearchAgentController:
                 return state
 
             try:
-                tool_input = self._build_tool_input(tool_name, state)
+                tool_input = self._build_tool_input(tool_name, state, step)
             except (ValueError, TypeError) as exc:
                 state.set_status("failed", f"invalid_tool_input: {exc}")
                 return state
@@ -268,6 +282,24 @@ class BoundedResearchAgentController:
                 state.set_status("failed", "timeout_exceeded")
                 return state
 
+            revision = self.replanner.revise(
+                state,
+                tool_name=tool_name,
+                result=result,
+                available_tools=self.registry.names,
+            )
+            if revision is not None:
+                state.plan_revisions.append(revision.to_dict())
+                state.plan = copy.deepcopy(list(revision.new_plan))
+                state.current_step += 1
+                state.retry_counts.clear()
+                state.touch()
+                plan_error = self.policy.validate_plan(state)
+                if plan_error:
+                    state.set_status("failed", plan_error)
+                    return state
+                continue
+
             if result.status == "failed":
                 retry_key = str(state.current_step)
                 retry_count = state.retry_counts.get(retry_key, 0)
@@ -284,6 +316,14 @@ class BoundedResearchAgentController:
                 state.set_status("rejected", reason)
                 return state
 
+            if bool(step.get("recovery_terminal", False)):
+                state.current_step += 1
+                state.set_status(
+                    "rejected",
+                    "no_corpus_evidence_scholarly_candidates_only",
+                )
+                return state
+
             state.retry_counts.pop(str(state.current_step), None)
             state.current_step += 1
             state.touch()
@@ -295,23 +335,51 @@ class BoundedResearchAgentController:
         self,
         tool_name: str,
         state: ResearchAgentState,
+        step: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
+        parameters = dict((step or {}).get("parameters", {}) or {})
         if tool_name == "retrieve_evidence":
-            return {"query": state.query}
+            allowed = {
+                key: parameters[key]
+                for key in (
+                    "top_k",
+                    "candidate_k",
+                    "read_cache",
+                    "rewrite",
+                    "multi_query",
+                )
+                if key in parameters
+            }
+            return {"query": state.query, **allowed}
         if tool_name == "search_scholarly_sources":
-            return {"query": state.query}
+            allowed = {
+                key: parameters[key]
+                for key in ("limit", "sources")
+                if key in parameters
+            }
+            return {"query": state.query, **allowed}
         if tool_name == "assess_evidence":
-            if not state.evidence:
-                raise ValueError("assess_evidence requires retrieved evidence.")
-            return {"query": state.query, "evidence": state.evidence}
+            if not state.evidence_bundle:
+                raise ValueError("assess_evidence requires an EvidenceBundle.")
+            return {"evidence_bundle": state.evidence_bundle}
         if tool_name == "generate_grounded_answer":
-            return {"query": state.query}
+            if not state.evidence_bundle or not state.gate_decision:
+                raise ValueError(
+                    "generate_grounded_answer requires EvidenceBundle and GateDecision."
+                )
+            return {
+                "evidence_bundle": state.evidence_bundle,
+                "gate_decision": state.gate_decision,
+            }
         if tool_name == "audit_answer":
             if state.answer is None:
                 raise ValueError("audit_answer requires a provenance-bearing answer artifact.")
-            if not state.evidence:
-                raise ValueError("audit_answer requires canonical evidence.")
-            return {"answer": state.answer, "evidence": state.evidence}
+            if not state.evidence_bundle:
+                raise ValueError("audit_answer requires the canonical EvidenceBundle.")
+            return {
+                "answer": state.answer,
+                "evidence_bundle": state.evidence_bundle,
+            }
         raise ValueError(f"No input adapter exists for tool: {tool_name}")
 
     def _apply_result(
@@ -325,33 +393,64 @@ class BoundedResearchAgentController:
             evidence = data.get("evidence", [])
             if isinstance(evidence, list):
                 state.evidence = self._serialize_evidence(evidence)
+            bundle = data.get("evidence_bundle")
+            if isinstance(bundle, Mapping):
+                normalized_bundle = EvidenceBundle.from_mapping(bundle)
+                state.evidence_bundle = normalized_bundle.to_dict()
+                state.evidence = [
+                    record.to_dict()
+                    for record in normalized_bundle.evidence_records
+                ]
+            elif state.evidence:
+                state.evidence_bundle = EvidenceBundle.create(
+                    query=state.query,
+                    evidence=state.evidence,
+                    retrieval_metadata=(
+                        data.get("retrieval")
+                        if isinstance(data.get("retrieval"), Mapping)
+                        else {}
+                    ),
+                    provenance={"source": "controller_legacy_retrieval_result"},
+                ).to_dict()
+            else:
+                state.evidence_bundle = None
+            state.gate_decision = None
+            state.answer = None
+            state.audit_result = None
         elif tool_name == "search_scholarly_sources":
             candidate_papers = data.get("candidate_papers", [])
             if isinstance(candidate_papers, list):
                 state.candidate_papers = self._serialize_candidate_papers(candidate_papers)
             else:
                 raise TypeError("candidate_papers must be a list.")
+        elif tool_name == "assess_evidence":
+            gate = data.get("gate_decision")
+            if isinstance(gate, Mapping):
+                normalized_gate = GateDecision.from_mapping(gate)
+                if (
+                    state.evidence_bundle
+                    and normalized_gate.evidence_bundle_id
+                    != state.evidence_bundle.get("bundle_id")
+                ):
+                    raise ValueError(
+                        "Evidence assessment returned a GateDecision for another bundle."
+                    )
+                state.gate_decision = normalized_gate.to_dict()
+            else:
+                assessment = data.get("assessment")
+                if isinstance(assessment, Mapping) and state.evidence_bundle:
+                    state.gate_decision = GateDecision.from_assessment(
+                        evidence_bundle_id=str(
+                            state.evidence_bundle.get("bundle_id", "")
+                        ),
+                        assessment=assessment,
+                    ).to_dict()
         elif tool_name == "generate_grounded_answer":
-            pipeline_result = data.get("pipeline_result", {})
-            if isinstance(pipeline_result, Mapping):
-                answer_stage = pipeline_result.get("answer_generation", {})
-                audit_stage = pipeline_result.get("citation_audit", {})
-                retrieval_stage = pipeline_result.get("retrieval", {})
-                answer_output = (
-                    answer_stage.get("output") if isinstance(answer_stage, Mapping) else None
-                )
-                audit_output = audit_stage.get("output") if isinstance(audit_stage, Mapping) else None
-                retrieval_output = (
-                    retrieval_stage.get("output") if isinstance(retrieval_stage, Mapping) else None
-                )
-                if isinstance(answer_output, Mapping):
-                    state.answer = copy.deepcopy(dict(answer_output))
-                if isinstance(audit_output, Mapping):
-                    state.audit_result = copy.deepcopy(dict(audit_output))
-                if isinstance(retrieval_output, Mapping):
-                    hits = retrieval_output.get("hits", [])
-                    if isinstance(hits, list) and hits:
-                        state.evidence = self._serialize_evidence(hits)
+            answer = data.get("answer", data.get("answer_artifact"))
+            if isinstance(answer, Mapping):
+                state.answer = copy.deepcopy(dict(answer))
+            else:
+                raise TypeError("Answer Tool returned an invalid answer artifact.")
         elif tool_name == "audit_answer":
             audit = data.get("audit")
             if isinstance(audit, Mapping):
@@ -365,14 +464,27 @@ class BoundedResearchAgentController:
         tool_input: Mapping[str, Any],
         result: ToolResult,
     ) -> None:
+        input_summary = self._input_summary(tool_input)
+        bundle_payload = result.data.get("evidence_bundle")
+        output_bundle_id = (
+            bundle_payload.get("bundle_id")
+            if isinstance(bundle_payload, Mapping)
+            else None
+        )
         state.tool_history.append(
             {
                 "tool_name": tool_name,
-                "input_summary": self._input_summary(tool_input),
+                "input_summary": input_summary,
                 "output_status": result.status,
                 "latency_ms": result.latency_ms,
                 "timestamp": result.timestamp,
                 "trace_id": result.trace_id,
+                "api_call_count": self._api_call_count(result.data),
+                "evidence_bundle_id": (
+                    result.data.get("evidence_bundle_id")
+                    or output_bundle_id
+                    or input_summary.get("evidence_bundle_id")
+                ),
             }
         )
         state.observations.append(
@@ -396,6 +508,18 @@ class BoundedResearchAgentController:
             text = str(query)
             summary["query_preview"] = text[:120]
             summary["query_length"] = len(text)
+        for key in (
+            "top_k",
+            "candidate_k",
+            "rewrite",
+            "multi_query",
+            "read_cache",
+            "filters",
+            "limit",
+            "sources",
+        ):
+            if key in tool_input:
+                summary[key] = copy.deepcopy(tool_input[key])
         evidence = tool_input.get("evidence")
         if isinstance(evidence, list):
             summary["evidence_count"] = len(evidence)
@@ -404,12 +528,43 @@ class BoundedResearchAgentController:
                 for item in evidence
                 if isinstance(item, Mapping) and item.get("chunk_id")
             ]
+        evidence_bundle = tool_input.get("evidence_bundle")
+        if isinstance(evidence_bundle, Mapping):
+            records = evidence_bundle.get("evidence_records", [])
+            summary["evidence_bundle_id"] = evidence_bundle.get("bundle_id")
+            summary["evidence_count"] = len(records) if isinstance(records, list) else 0
+            summary["evidence_chunk_ids"] = [
+                str(item.get("chunk_id"))
+                for item in records
+                if isinstance(item, Mapping) and item.get("chunk_id")
+            ]
+        gate = tool_input.get("gate_decision")
+        if isinstance(gate, Mapping):
+            summary["gate_status"] = gate.get("status")
+            summary["gate_bundle_id"] = gate.get("evidence_bundle_id")
         answer = tool_input.get("answer")
         if isinstance(answer, Mapping):
             summary["answer_length"] = len(str(answer.get("answer", "")))
             citations = answer.get("citations", [])
             summary["citation_count"] = len(citations) if isinstance(citations, list) else 0
         return summary
+
+    @staticmethod
+    def _api_call_count(value: Any) -> int:
+        if isinstance(value, Mapping):
+            direct = value.get("api_call_count")
+            if isinstance(direct, int) and not isinstance(direct, bool):
+                return max(0, direct)
+            return sum(
+                BoundedResearchAgentController._api_call_count(item)
+                for item in value.values()
+            )
+        if isinstance(value, (list, tuple)):
+            return sum(
+                BoundedResearchAgentController._api_call_count(item)
+                for item in value
+            )
+        return 0
 
     @staticmethod
     def _serialize_evidence(
@@ -448,13 +603,7 @@ class BoundedResearchAgentController:
         if tool_name == "assess_evidence":
             return "insufficient_evidence"
         if tool_name == "generate_grounded_answer":
-            pipeline_result = result.data.get("pipeline_result", {})
-            final_status = (
-                pipeline_result.get("final_status")
-                if isinstance(pipeline_result, Mapping)
-                else None
-            )
-            return "insufficient_evidence" if final_status == "rejected" else "answer_not_grounded"
+            return result.reason or "answer_not_grounded"
         if tool_name == "audit_answer":
             return "answer_not_grounded"
         return result.reason or "tool_rejected"

@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import uuid
 from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from researchguard.retrieval.models import RetrievalHit
 
@@ -15,6 +16,8 @@ TOOL_RESULT_SCHEMA_VERSION = "researchguard.tool_result.v1"
 EVIDENCE_RECORD_SCHEMA_VERSION = "researchguard.evidence_record.v1"
 TOOL_ERROR_SCHEMA_VERSION = "researchguard.tool_error.v1"
 TOOL_SPEC_SCHEMA_VERSION = "researchguard.tool_spec.v1"
+EVIDENCE_BUNDLE_SCHEMA_VERSION = "researchguard.evidence_bundle.v1"
+GATE_DECISION_SCHEMA_VERSION = "researchguard.gate_decision.v1"
 
 
 def utc_timestamp() -> str:
@@ -263,6 +266,224 @@ class EvidenceRecord:
             "score": self.score,
             "rank": self.rank,
             "provenance": _json_value(self.provenance),
+        }
+
+
+def _evidence_bundle_id(
+    query: str,
+    records: tuple[EvidenceRecord, ...],
+    retrieval_metadata: Mapping[str, Any],
+    provenance: Mapping[str, Any],
+) -> str:
+    payload = {
+        "query": query,
+        "evidence_records": [record.to_dict() for record in records],
+        "retrieval_metadata": _json_value(retrieval_metadata),
+        "provenance": _json_value(provenance),
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return f"evidence-{hashlib.sha256(encoded).hexdigest()}"
+
+
+@dataclass(frozen=True)
+class EvidenceBundle:
+    query: str
+    evidence_records: tuple[EvidenceRecord, ...]
+    retrieval_metadata: Mapping[str, Any] = field(default_factory=dict)
+    provenance: Mapping[str, Any] = field(default_factory=dict)
+    bundle_id: str = ""
+    version: str = "1.0.0"
+    schema_version: str = EVIDENCE_BUNDLE_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        normalized_query = " ".join(str(self.query).split()).strip()
+        if not normalized_query:
+            raise ValueError("EvidenceBundle.query must not be empty.")
+        if not self.evidence_records:
+            raise ValueError("EvidenceBundle requires at least one evidence record.")
+        chunk_ids = [record.chunk_id for record in self.evidence_records]
+        if len(chunk_ids) != len(set(chunk_ids)):
+            raise ValueError("EvidenceBundle contains duplicate chunk_id values.")
+        object.__setattr__(self, "query", normalized_query)
+        expected_id = _evidence_bundle_id(
+            normalized_query,
+            self.evidence_records,
+            self.retrieval_metadata,
+            self.provenance,
+        )
+        if self.bundle_id and self.bundle_id != expected_id:
+            raise ValueError("EvidenceBundle.bundle_id does not match its canonical content.")
+        object.__setattr__(self, "bundle_id", expected_id)
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        query: str,
+        evidence: Iterable[EvidenceRecord | Mapping[str, Any]],
+        retrieval_metadata: Mapping[str, Any] | None = None,
+        provenance: Mapping[str, Any] | None = None,
+    ) -> "EvidenceBundle":
+        records = tuple(
+            item if isinstance(item, EvidenceRecord) else EvidenceRecord.from_mapping(item)
+            for item in evidence
+        )
+        return cls(
+            query=query,
+            evidence_records=records,
+            retrieval_metadata=dict(retrieval_metadata or {}),
+            provenance=dict(provenance or {}),
+        )
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "EvidenceBundle":
+        raw_records = value.get("evidence_records", value.get("evidence", ()))
+        if not isinstance(raw_records, (list, tuple)):
+            raise TypeError("EvidenceBundle.evidence_records must be a list.")
+        return cls(
+            query=str(value.get("query", "")),
+            evidence_records=tuple(
+                item if isinstance(item, EvidenceRecord) else EvidenceRecord.from_mapping(item)
+                for item in raw_records
+            ),
+            retrieval_metadata=dict(value.get("retrieval_metadata", {}) or {}),
+            provenance=dict(value.get("provenance", {}) or {}),
+            bundle_id=str(value.get("bundle_id", "")),
+            version=str(value.get("version", "1.0.0")),
+            schema_version=str(
+                value.get("schema_version", EVIDENCE_BUNDLE_SCHEMA_VERSION)
+            ),
+        )
+
+    @property
+    def chunk_ids(self) -> tuple[str, ...]:
+        return tuple(record.chunk_id for record in self.evidence_records)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "version": self.version,
+            "bundle_id": self.bundle_id,
+            "query": self.query,
+            "evidence_records": [record.to_dict() for record in self.evidence_records],
+            "retrieval_metadata": _json_value(self.retrieval_metadata),
+            "provenance": _json_value(self.provenance),
+        }
+
+
+@dataclass(frozen=True)
+class GateDecision:
+    status: str
+    reason: str
+    supporting_chunk_ids: tuple[str, ...]
+    evidence_bundle_id: str
+    confidence: float = 0.0
+    answerable: bool = False
+    assessment: Mapping[str, Any] = field(default_factory=dict)
+    version: str = "1.0.0"
+    schema_version: str = GATE_DECISION_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        normalized_status = str(self.status).strip().casefold()
+        if normalized_status not in {"strong", "partial", "unsupported"}:
+            raise ValueError(f"Unsupported GateDecision status: {self.status}")
+        if not str(self.reason).strip():
+            raise ValueError("GateDecision.reason must not be empty.")
+        if not self.evidence_bundle_id.strip():
+            raise ValueError("GateDecision.evidence_bundle_id must not be empty.")
+        if len(self.supporting_chunk_ids) != len(set(self.supporting_chunk_ids)):
+            raise ValueError("GateDecision supporting_chunk_ids must be unique.")
+        expected_answerable = normalized_status == "strong"
+        if bool(self.answerable) != expected_answerable:
+            raise ValueError("GateDecision answerable flag does not match status.")
+        if normalized_status in {"strong", "partial"} and not self.supporting_chunk_ids:
+            raise ValueError(f"{normalized_status} GateDecision requires supporting evidence.")
+        if normalized_status == "unsupported" and self.supporting_chunk_ids:
+            raise ValueError("Unsupported GateDecision cannot contain supporting evidence.")
+        object.__setattr__(self, "status", normalized_status)
+
+    @classmethod
+    def from_assessment(
+        cls,
+        *,
+        evidence_bundle_id: str,
+        assessment: Mapping[str, Any],
+    ) -> "GateDecision":
+        status = str(assessment.get("support_level", "unsupported")).casefold()
+        return cls(
+            status=status,
+            reason=str(assessment.get("reason") or f"evidence_{status}"),
+            supporting_chunk_ids=tuple(
+                dict.fromkeys(
+                    str(item)
+                    for item in assessment.get("supporting_chunk_ids", ())
+                    if str(item).strip()
+                )
+            ),
+            evidence_bundle_id=evidence_bundle_id,
+            confidence=float(assessment.get("confidence", 0.0)),
+            answerable=bool(assessment.get("answerable", status == "strong")),
+            assessment=dict(assessment),
+        )
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "GateDecision":
+        return cls(
+            status=str(value.get("status", value.get("support_level", ""))),
+            reason=str(value.get("reason", "")),
+            supporting_chunk_ids=tuple(
+                str(item) for item in value.get("supporting_chunk_ids", ())
+            ),
+            evidence_bundle_id=str(value.get("evidence_bundle_id", "")),
+            confidence=float(value.get("confidence", 0.0)),
+            answerable=bool(value.get("answerable", False)),
+            assessment=dict(value.get("assessment", {}) or {}),
+            version=str(value.get("version", "1.0.0")),
+            schema_version=str(
+                value.get("schema_version", GATE_DECISION_SCHEMA_VERSION)
+            ),
+        )
+
+    def to_sufficiency_result(self) -> Any:
+        from researchguard.retrieval.evidence_judge import EvidenceSufficiencyResult
+
+        source = dict(self.assessment)
+        return EvidenceSufficiencyResult(
+            answerable=self.answerable,
+            support_level=self.status,
+            confidence=self.confidence,
+            reason=self.reason,
+            supporting_chunk_ids=self.supporting_chunk_ids,
+            model=str(source.get("model", "agent_evidence_gate")),
+            prompt_version=str(source.get("prompt_version", "agent_evidence_gate_v1")),
+            config_version=str(source.get("config_version", "agent_evidence_gate_v1.0")),
+            timestamp=str(source.get("timestamp", utc_timestamp())),
+            cache_hit=bool(source.get("cache_hit", False)),
+            fallback_used=bool(source.get("fallback_used", False)),
+            fallback_reason=source.get("fallback_reason"),
+            api_call_count=int(source.get("api_call_count", 0)),
+            input_tokens=int(source.get("input_tokens", 0)),
+            output_tokens=int(source.get("output_tokens", 0)),
+            latency_ms=float(source.get("latency_ms", 0.0)),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "version": self.version,
+            "status": self.status,
+            "reason": self.reason,
+            "supporting_chunk_ids": list(self.supporting_chunk_ids),
+            "evidence_bundle_id": self.evidence_bundle_id,
+            "confidence": self.confidence,
+            "answerable": self.answerable,
+            "assessment": _json_value(self.assessment),
         }
 
 

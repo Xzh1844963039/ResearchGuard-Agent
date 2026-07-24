@@ -148,6 +148,7 @@ def cmd_agent_run(args: argparse.Namespace) -> None:
         max_steps=args.max_steps,
         max_tool_calls=args.max_tool_calls,
         max_retry=args.max_retry,
+        max_plan_revisions=args.max_plan_revisions,
         timeout=args.timeout,
     )
     registry = build_default_registry(args.config)
@@ -326,6 +327,7 @@ def main() -> None:
     agent_parser.add_argument("--max-steps", type=int, default=6)
     agent_parser.add_argument("--max-tool-calls", type=int, default=10)
     agent_parser.add_argument("--max-retry", type=int, default=2)
+    agent_parser.add_argument("--max-plan-revisions", type=int, default=2)
     agent_parser.add_argument("--timeout", type=float, default=120.0)
     agent_parser.add_argument(
         "--show-trace",

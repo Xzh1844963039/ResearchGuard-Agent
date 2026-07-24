@@ -7,7 +7,13 @@ from collections.abc import Callable
 from typing import Any
 
 from researchguard.agent import BoundedPlanner, BoundedResearchAgentController, ResearchAgentState
-from researchguard.tools import ToolRegistry, ToolResult, ToolSpec
+from researchguard.tools import (
+    EvidenceBundle,
+    GateDecision,
+    ToolRegistry,
+    ToolResult,
+    ToolSpec,
+)
 from researchguard.workflows import (
     ClaimAuditWorkflow,
     LiteratureReviewWorkflow,
@@ -111,7 +117,17 @@ def success(name: str, data: dict[str, Any]) -> ToolResult:
     )
 
 
-def rejected_assessment() -> ToolResult:
+def rejected_assessment(bundle: EvidenceBundle) -> ToolResult:
+    assessment = {
+        "support_level": "unsupported",
+        "answerable": False,
+        "reason": "insufficient_evidence",
+        "supporting_chunk_ids": [],
+    }
+    gate = GateDecision.from_assessment(
+        evidence_bundle_id=bundle.bundle_id,
+        assessment=assessment,
+    )
     return ToolResult.create(
         status="rejected",
         message="unsupported",
@@ -119,13 +135,7 @@ def rejected_assessment() -> ToolResult:
         tool_name="assess_evidence",
         tool_version="test",
         latency_ms=1,
-        data={
-            "assessment": {
-                "support_level": "unsupported",
-                "answerable": False,
-                "supporting_chunk_ids": [],
-            }
-        },
+        data={"assessment": assessment, "gate_decision": gate.to_dict()},
     )
 
 
@@ -164,21 +174,6 @@ def answer_artifact() -> dict[str, Any]:
     }
 
 
-def guarded_pipeline_result() -> dict[str, Any]:
-    return {
-        "final_status": "grounded",
-        "retrieval": {"output": {"hits": [EVIDENCE_A, EVIDENCE_B]}},
-        "answer_generation": {"output": answer_artifact()},
-        "citation_audit": {
-            "output": {
-                "audit_completed": True,
-                "overall_grounded": True,
-                "evidence_chunk_ids": [EVIDENCE_A["chunk_id"], EVIDENCE_B["chunk_id"]],
-            }
-        },
-    }
-
-
 def make_registry(*, unsupported: bool = False) -> tuple[ToolRegistry, dict[str, FakeTool]]:
     registry = ToolRegistry()
     tools: dict[str, FakeTool] = {}
@@ -203,36 +198,64 @@ def make_registry(*, unsupported: bool = False) -> tuple[ToolRegistry, dict[str,
             evidence = [EVIDENCE_B]
         else:
             evidence = [EVIDENCE_A, EVIDENCE_B]
-        return success("retrieve_evidence", {"evidence": evidence})
+        bundle = EvidenceBundle.create(
+            query=str(kwargs["query"]),
+            evidence=evidence,
+        )
+        return success(
+            "retrieve_evidence",
+            {"evidence": evidence, "evidence_bundle": bundle.to_dict()},
+        )
 
     tools["retrieve_evidence"] = FakeTool("retrieve_evidence", retrieve)
+    def assess(**kwargs: Any) -> ToolResult:
+        bundle = EvidenceBundle.from_mapping(kwargs["evidence_bundle"])
+        if unsupported:
+            return rejected_assessment(bundle)
+        assessment = {
+            "support_level": "strong",
+            "answerable": True,
+            "reason": "direct support",
+            "confidence": 0.94,
+            "supporting_chunk_ids": list(bundle.chunk_ids),
+        }
+        gate = GateDecision.from_assessment(
+            evidence_bundle_id=bundle.bundle_id,
+            assessment=assessment,
+        )
+        return success(
+            "assess_evidence",
+            {"assessment": assessment, "gate_decision": gate.to_dict()},
+        )
+
     tools["assess_evidence"] = FakeTool(
         "assess_evidence",
-        (lambda **_: rejected_assessment())
-        if unsupported
-        else (
-            lambda **_: success(
-                "assess_evidence",
-                {
-                    "assessment": {
-                        "support_level": "strong",
-                        "answerable": True,
-                        "confidence": 0.94,
-                        "supporting_chunk_ids": [
-                            EVIDENCE_A["chunk_id"],
-                            EVIDENCE_B["chunk_id"],
-                        ],
-                    }
-                },
-            )
-        ),
+        assess,
     )
+    def generate(**kwargs: Any) -> ToolResult:
+        bundle = EvidenceBundle.from_mapping(kwargs["evidence_bundle"])
+        artifact = answer_artifact()
+        artifact["evidence_chunk_ids"] = list(bundle.chunk_ids)
+        artifact["citations"] = [
+            {
+                "chunk_id": record.chunk_id,
+                "doc_id": record.doc_id,
+                "section": record.section,
+                "page": record.page,
+            }
+            for record in bundle.evidence_records
+        ]
+        return success(
+            "generate_grounded_answer",
+            {
+                "answer": artifact,
+                "evidence_bundle_id": bundle.bundle_id,
+            },
+        )
+
     tools["generate_grounded_answer"] = FakeTool(
         "generate_grounded_answer",
-        lambda **_: success(
-            "generate_grounded_answer",
-            {"pipeline_result": guarded_pipeline_result()},
-        ),
+        generate,
     )
     tools["audit_answer"] = FakeTool(
         "audit_answer",
@@ -360,8 +383,9 @@ class WorkflowTests(unittest.TestCase):
             [["paper-a"], ["paper-b"]],
         )
         audit_call = tools["audit_answer"].calls[0]
+        audit_bundle = EvidenceBundle.from_mapping(audit_call["evidence_bundle"])
         self.assertEqual(
-            {item["chunk_id"] for item in audit_call["evidence"]},
+            set(audit_bundle.chunk_ids),
             set(audit_call["answer"]["evidence_chunk_ids"]),
         )
 
@@ -390,7 +414,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result.status, "success")
         audit_call = tools["audit_answer"].calls[0]
         citation_ids = {item["chunk_id"] for item in audit_call["answer"]["citations"]}
-        evidence_ids = {item["chunk_id"] for item in audit_call["evidence"]}
+        audit_bundle = EvidenceBundle.from_mapping(audit_call["evidence_bundle"])
+        evidence_ids = set(audit_bundle.chunk_ids)
         self.assertEqual(citation_ids, evidence_ids)
         self.assertIn(EVIDENCE_A["chunk_id"], citation_ids)
         self.assertEqual(result.output["citations"][0]["page"], EVIDENCE_A["page"])

@@ -65,3 +65,7 @@ tmp/
 temp/
 logs/
 *.log
+
+# Local migration repositories retained outside the public project tree
+/EvidenceClaw/
+/rag_agent_harness/

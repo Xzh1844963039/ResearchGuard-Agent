@@ -32,6 +32,9 @@ class TraceCollector:
             query=state.query,
             task_type=state.task_type,
             plan=tuple(plan),
+            plan_revisions=tuple(
+                copy.deepcopy(getattr(state, "plan_revisions", ()))
+            ),
             workflow_name=state.workflow_name,
             workflow_steps=tuple(copy.deepcopy(state.workflow_steps)),
             tool_calls=tuple(copy.deepcopy(state.tool_history)),
@@ -73,6 +76,16 @@ class TraceCollector:
                     "summary": str(call.get("tool_name", "unknown")),
                     "trace_id": call.get("trace_id"),
                     "latency_ms": call.get("latency_ms"),
+                }
+            )
+        for revision in getattr(state, "plan_revisions", ()):
+            timeline.append(
+                {
+                    "stage": "replan",
+                    "status": "revised",
+                    "timestamp": revision.get("created_at"),
+                    "summary": revision.get("reason", "plan_revised"),
+                    "revision_id": revision.get("revision_id"),
                 }
             )
         timeline.extend(

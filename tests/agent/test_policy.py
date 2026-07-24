@@ -14,6 +14,7 @@ class AgentPolicyTests(unittest.TestCase):
         self.assertEqual(policy.max_steps, 6)
         self.assertEqual(policy.max_tool_calls, 10)
         self.assertEqual(policy.max_retry, 2)
+        self.assertEqual(policy.max_plan_revisions, 2)
         self.assertGreater(policy.timeout, 0)
 
     def test_timeout_and_call_limits_return_stop_reasons(self) -> None:
@@ -42,6 +43,8 @@ class AgentPolicyTests(unittest.TestCase):
             AgentPolicy(max_tool_calls=0)
         with self.assertRaises(ValueError):
             AgentPolicy(max_retry=-1)
+        with self.assertRaises(ValueError):
+            AgentPolicy(max_plan_revisions=-1)
         with self.assertRaises(ValueError):
             AgentPolicy(timeout=0)
 

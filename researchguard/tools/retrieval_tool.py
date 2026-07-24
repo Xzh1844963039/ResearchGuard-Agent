@@ -9,7 +9,13 @@ from researchguard.pipeline import DEFAULT_CONFIG_PATH, PipelineSettings, load_p
 from researchguard.retrieval.filters import MetadataFilter
 from researchguard.retrieval.models import RetrievalError
 from researchguard.retrieval.retrieval_v1 import RetrievalEngine
-from researchguard.tools.contracts import EvidenceRecord, ToolError, ToolResult, ToolSpec
+from researchguard.tools.contracts import (
+    EvidenceBundle,
+    EvidenceRecord,
+    ToolError,
+    ToolResult,
+    ToolSpec,
+)
 
 
 class RetrievalTool:
@@ -40,6 +46,8 @@ class RetrievalTool:
                 "top_k": "optional positive integer",
                 "candidate_k": "optional positive integer",
                 "read_cache": "boolean",
+                "rewrite": "optional boolean override",
+                "multi_query": "optional boolean override",
             },
         )
 
@@ -65,6 +73,8 @@ class RetrievalTool:
         top_k: int | None = None,
         candidate_k: int | None = None,
         read_cache: bool = True,
+        rewrite: bool | None = None,
+        multi_query: bool | None = None,
     ) -> ToolResult:
         started = time.perf_counter()
         try:
@@ -81,6 +91,12 @@ class RetrievalTool:
                 raise TypeError("filters must be a MetadataFilter or mapping.")
 
             settings = self._pipeline_settings()
+            rewrite_enabled = settings.rewrite_enabled if rewrite is None else bool(rewrite)
+            multi_query_enabled = (
+                settings.multi_query_enabled if multi_query is None else bool(multi_query)
+            )
+            if multi_query_enabled and not rewrite_enabled:
+                raise ValueError("multi_query requires rewrite to be enabled.")
             response = self._retrieval_engine().retrieve(
                 normalized_query,
                 mode=settings.retrieval_mode,
@@ -90,13 +106,24 @@ class RetrievalTool:
                 rerank=settings.reranker_enabled,
                 rerank_candidate_k=settings.reranker_candidate_k,
                 rerank_read_cache=read_cache,
-                rewrite=settings.rewrite_enabled,
-                multi_query=settings.multi_query_enabled,
+                rewrite=rewrite_enabled,
+                multi_query=multi_query_enabled,
                 rewrite_read_cache=read_cache,
             )
             evidence = [EvidenceRecord.from_retrieval_hit(hit) for hit in response.hits]
             response_data = response.to_dict(include_text=False)
             response_data.pop("hits", None)
+            bundle = EvidenceBundle.create(
+                query=response.query,
+                evidence=evidence,
+                retrieval_metadata=response_data,
+                provenance={
+                    "tool_name": self.name,
+                    "tool_version": self.version,
+                    "rewrite_enabled": rewrite_enabled,
+                    "multi_query_enabled": multi_query_enabled,
+                },
+            ) if evidence else None
             latency_ms = (time.perf_counter() - started) * 1000.0
             return ToolResult.create(
                 status="success",
@@ -107,6 +134,7 @@ class RetrievalTool:
                 data={
                     "query": response.query,
                     "evidence": [record.to_dict() for record in evidence],
+                    "evidence_bundle": bundle.to_dict() if bundle else None,
                     "ranking": [
                         {
                             "rank": record.rank,

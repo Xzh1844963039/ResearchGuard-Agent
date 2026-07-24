@@ -8,7 +8,14 @@ from typing import Any, Iterable, Mapping
 from researchguard.pipeline import DEFAULT_CONFIG_PATH, PipelineSettings, load_pipeline_settings
 from researchguard.retrieval.evidence_judge import load_evidence_judge_settings
 from researchguard.retrieval.evidence_pipeline import EvidenceSufficiencyPipeline
-from researchguard.tools.contracts import EvidenceRecord, ToolError, ToolResult, ToolSpec
+from researchguard.tools.contracts import (
+    EvidenceBundle,
+    EvidenceRecord,
+    GateDecision,
+    ToolError,
+    ToolResult,
+    ToolSpec,
+)
 
 
 def normalize_evidence(
@@ -53,8 +60,7 @@ class EvidenceTool:
             version=self.version,
             description=self.description,
             input_schema={
-                "query": "non-empty string",
-                "evidence": "non-empty list of EvidenceRecord-compatible mappings",
+                "evidence_bundle": "EvidenceBundle mapping produced by Retrieval Tool",
                 "read_cache": "boolean",
             },
         )
@@ -76,25 +82,47 @@ class EvidenceTool:
 
     def assess_evidence(
         self,
-        query: str,
-        evidence: Iterable[EvidenceRecord | Mapping[str, Any]],
+        evidence_bundle: EvidenceBundle | Mapping[str, Any] | None = None,
         *,
+        query: str | None = None,
+        evidence: Iterable[EvidenceRecord | Mapping[str, Any]] | None = None,
         read_cache: bool = True,
     ) -> ToolResult:
         started = time.perf_counter()
         try:
-            normalized_query = str(query).strip()
-            if not normalized_query:
-                raise ValueError("Query must not be empty.")
-            records = normalize_evidence(evidence)
+            if evidence_bundle is None:
+                normalized_query = str(query or "").strip()
+                if not normalized_query:
+                    raise ValueError("Query must not be empty.")
+                records = normalize_evidence(evidence or ())
+                bundle = EvidenceBundle.create(
+                    query=normalized_query,
+                    evidence=records,
+                    provenance={"source": "legacy_evidence_tool_input"},
+                )
+            elif isinstance(evidence_bundle, EvidenceBundle):
+                bundle = evidence_bundle
+                records = bundle.evidence_records
+            elif isinstance(evidence_bundle, Mapping):
+                bundle = EvidenceBundle.from_mapping(evidence_bundle)
+                records = bundle.evidence_records
+            else:
+                raise TypeError("evidence_bundle must be an EvidenceBundle or mapping.")
             result = self._evidence_pipeline().assess(
-                normalized_query,
+                bundle.query,
                 [record.to_retrieval_mapping() for record in records],
                 read_cache=read_cache,
             )
             latency_ms = (time.perf_counter() - started) * 1000.0
+            assessment = result.to_dict()
+            gate_decision = GateDecision.from_assessment(
+                evidence_bundle_id=bundle.bundle_id,
+                assessment=assessment,
+            )
             data = {
-                "assessment": result.to_dict(),
+                "assessment": assessment,
+                "gate_decision": gate_decision.to_dict(),
+                "evidence_bundle_id": bundle.bundle_id,
                 "evidence_chunk_ids": [record.chunk_id for record in records],
             }
             if result.fallback_used:

@@ -108,27 +108,28 @@ class LiteratureReviewWorkflow(ResearchWorkflow):
                 return self._tool_failure(
                     retrieval_result, topic, papers, evidence, trace, started_at, started
                 )
-            evidence = self._evidence_from_result(retrieval_result)
+            bundle = self._bundle_from_result(retrieval_result, query=topic)
+            evidence = [record.to_dict() for record in bundle.evidence_records]
             state.evidence = copy.deepcopy(evidence)
+            state.evidence_bundle = bundle.to_dict()
 
             assessment_result = self._invoke(
                 state,
                 trace,
                 started,
                 "assess_evidence",
-                query=topic,
-                evidence=evidence,
+                evidence_bundle=bundle.to_dict(),
             )
             if assessment_result.status == "failed":
                 return self._tool_failure(
                     assessment_result, topic, papers, evidence, trace, started_at, started
                 )
-            assessment = assessment_result.data.get("assessment")
-            assessment = dict(assessment) if isinstance(assessment, Mapping) else {}
+            gate = self._gate_from_result(assessment_result, bundle=bundle)
+            state.gate_decision = gate.to_dict()
             if (
                 assessment_result.status == "rejected"
-                or str(assessment.get("support_level", "")).casefold() != "strong"
-                or not bool(assessment.get("answerable", False))
+                or gate.status != "strong"
+                or not gate.answerable
             ):
                 return self._rejected(topic, papers, evidence, trace, started_at, started)
 
@@ -137,7 +138,8 @@ class LiteratureReviewWorkflow(ResearchWorkflow):
                 trace,
                 started,
                 "generate_grounded_answer",
-                query=topic,
+                evidence_bundle=bundle.to_dict(),
+                gate_decision=gate.to_dict(),
             )
             if answer_result.status != "success":
                 if answer_result.status == "rejected":
@@ -145,10 +147,8 @@ class LiteratureReviewWorkflow(ResearchWorkflow):
                 return self._tool_failure(
                     answer_result, topic, papers, evidence, trace, started_at, started
                 )
-            answer, grounded_evidence, pipeline_audit = self._guarded_artifacts(answer_result)
+            answer = self._answer_from_result(answer_result, bundle=bundle)
             state.answer = copy.deepcopy(answer)
-            state.evidence = copy.deepcopy(grounded_evidence)
-            state.audit_result = copy.deepcopy(pipeline_audit)
 
             audit_result = self._invoke(
                 state,
@@ -156,15 +156,15 @@ class LiteratureReviewWorkflow(ResearchWorkflow):
                 started,
                 "audit_answer",
                 answer=answer,
-                evidence=grounded_evidence,
+                evidence_bundle=bundle.to_dict(),
             )
             audit = audit_result.data.get("audit")
-            audit = dict(audit) if isinstance(audit, Mapping) else pipeline_audit
+            audit = dict(audit) if isinstance(audit, Mapping) else None
             state.audit_result = copy.deepcopy(audit)
             output = LiteratureReviewResult(
                 topic=topic,
                 papers=tuple(papers),
-                evidence=tuple(grounded_evidence),
+                evidence=tuple(evidence),
                 summary=str(answer.get("answer", "")),
                 citations=tuple(answer.get("citations", [])),
                 audit_result=audit,

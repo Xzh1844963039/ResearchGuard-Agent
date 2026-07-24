@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 
-AGENT_TRACE_SCHEMA_VERSION = "researchguard.agent_trace.v1"
-AGENT_TRACE_VERSION = "1.0.0"
+AGENT_TRACE_SCHEMA_VERSION = "researchguard.agent_trace.v2"
+AGENT_TRACE_VERSION = "2.0.0"
 
 
 @dataclass(frozen=True)
@@ -17,6 +17,7 @@ class AgentTrace:
     query: str
     task_type: str
     plan: tuple[Mapping[str, Any], ...]
+    plan_revisions: tuple[Mapping[str, Any], ...]
     workflow_name: str | None
     workflow_steps: tuple[Mapping[str, Any], ...]
     tool_calls: tuple[Mapping[str, Any], ...]
@@ -46,6 +47,7 @@ class AgentTrace:
             "query": self.query,
             "task_type": self.task_type,
             "plan": copy.deepcopy(list(self.plan)),
+            "plan_revisions": copy.deepcopy(list(self.plan_revisions)),
             "workflow_name": self.workflow_name,
             "workflow_steps": copy.deepcopy(list(self.workflow_steps)),
             "tool_calls": copy.deepcopy(list(self.tool_calls)),

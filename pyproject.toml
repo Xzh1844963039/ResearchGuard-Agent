@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=81"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "researchguard-agent"
+version = "2.1.0"
+description = "Bounded evidence-grounded research agent for scientific papers"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+authors = [
+  { name = "Xzh1844963039" },
+]
+dependencies = [
+  "chromadb>=1.5,<2",
+  "numpy>=2,<3",
+  "openai>=2,<3",
+  "PyMuPDF>=1.27,<2",
+  "PyYAML>=6,<7",
+  "requests>=2.32,<3",
+  "sentence-transformers>=5,<6",
+  "streamlit>=1.58,<2",
+]
+
+[project.optional-dependencies]
+ocr = [
+  "rapidocr-onnxruntime>=1.4,<2",
+]
+dev = []
+
+[project.scripts]
+researchguard = "researchguard.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["researchguard*"]

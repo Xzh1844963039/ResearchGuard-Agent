@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from researchguard.tools import ScholarPaperRecord
+from researchguard.tools import EvidenceBundle, ScholarPaperRecord
 from researchguard.workflows.base import (
     ResearchWorkflow,
     WorkflowExecutionError,
@@ -133,7 +133,13 @@ class PaperComparisonWorkflow(ResearchWorkflow):
                         started_at,
                         started,
                     )
-                paper_evidence = self._evidence_from_result(retrieval_result)
+                paper_bundle = self._bundle_from_result(
+                    retrieval_result,
+                    query=str(kwargs["query"]),
+                )
+                paper_evidence = [
+                    record.to_dict() for record in paper_bundle.evidence_records
+                ]
                 evidence_table.append(
                     {
                         "paper": spec["name"],
@@ -144,14 +150,29 @@ class PaperComparisonWorkflow(ResearchWorkflow):
                 combined_evidence.extend(paper_evidence)
 
             combined_evidence = self._deduplicate_evidence(combined_evidence)
+            generation_query = (
+                f"{state.query} Compare only the evidence-supported dimensions: "
+                + ", ".join(dimensions)
+                + "."
+            )
+            bundle = EvidenceBundle.create(
+                query=generation_query,
+                evidence=combined_evidence,
+                provenance={
+                    "source": "paper_comparison_workflow",
+                    "document_queries": [
+                        row["paper"] for row in evidence_table
+                    ],
+                },
+            )
             state.evidence = copy.deepcopy(combined_evidence)
+            state.evidence_bundle = bundle.to_dict()
             assessment_result = self._invoke(
                 state,
                 trace,
                 started,
                 "assess_evidence",
-                query=state.query,
-                evidence=combined_evidence,
+                evidence_bundle=bundle.to_dict(),
             )
             if assessment_result.status == "failed":
                 return self._failure(
@@ -163,28 +184,24 @@ class PaperComparisonWorkflow(ResearchWorkflow):
                     started_at,
                     started,
                 )
-            assessment = assessment_result.data.get("assessment")
-            assessment = dict(assessment) if isinstance(assessment, Mapping) else {}
+            gate = self._gate_from_result(assessment_result, bundle=bundle)
+            state.gate_decision = gate.to_dict()
             if (
                 assessment_result.status == "rejected"
-                or str(assessment.get("support_level", "")).casefold() != "strong"
-                or not bool(assessment.get("answerable", False))
+                or gate.status != "strong"
+                or not gate.answerable
             ):
                 return self._rejected(
                     paper_specs, dimensions, evidence_table, trace, started_at, started
                 )
 
-            generation_query = (
-                f"{state.query} Compare only the evidence-supported dimensions: "
-                + ", ".join(dimensions)
-                + "."
-            )
             answer_result = self._invoke(
                 state,
                 trace,
                 started,
                 "generate_grounded_answer",
-                query=generation_query,
+                evidence_bundle=bundle.to_dict(),
+                gate_decision=gate.to_dict(),
             )
             if answer_result.status != "success":
                 if answer_result.status == "rejected":
@@ -200,20 +217,18 @@ class PaperComparisonWorkflow(ResearchWorkflow):
                     started_at,
                     started,
                 )
-            answer, grounded_evidence, pipeline_audit = self._guarded_artifacts(answer_result)
+            answer = self._answer_from_result(answer_result, bundle=bundle)
             state.answer = copy.deepcopy(answer)
-            state.evidence = copy.deepcopy(grounded_evidence)
-            state.audit_result = copy.deepcopy(pipeline_audit)
             audit_result = self._invoke(
                 state,
                 trace,
                 started,
                 "audit_answer",
                 answer=answer,
-                evidence=grounded_evidence,
+                evidence_bundle=bundle.to_dict(),
             )
             audit = audit_result.data.get("audit")
-            audit = dict(audit) if isinstance(audit, Mapping) else pipeline_audit
+            audit = dict(audit) if isinstance(audit, Mapping) else None
             state.audit_result = copy.deepcopy(audit)
             output = ComparisonResult(
                 papers=tuple(

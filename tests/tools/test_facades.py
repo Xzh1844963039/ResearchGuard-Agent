@@ -9,6 +9,7 @@ from researchguard.retrieval.answer_generator import AnswerCitation, AnswerGener
 from researchguard.retrieval.evidence_judge import EvidenceSufficiencyResult
 from researchguard.retrieval.models import MetadataFilter, RetrievalHit, RetrievalResponse
 from researchguard.tools.audit_tool import CitationAuditTool
+from researchguard.tools.contracts import EvidenceBundle
 from researchguard.tools.evidence_tool import EvidenceTool
 from researchguard.tools.retrieval_tool import RetrievalTool
 
@@ -149,13 +150,18 @@ class FacadeTests(unittest.TestCase):
             "provenance": {"source_block_ids": ["p7-b2"]},
         }
 
-        result = tool.assess_evidence("What improved?", [evidence])
+        bundle = EvidenceBundle.create(query="What improved?", evidence=[evidence])
+        result = tool.assess_evidence(bundle)
 
         self.assertEqual(result.status, "success")
         self.assertEqual(pipeline.received_hits[0]["chunk_id"], "paper-a::chunk-2")
         self.assertEqual(pipeline.received_hits[0]["page_start"], 7)
         self.assertEqual(pipeline.received_hits[0]["section"], "results")
         self.assertEqual(pipeline.received_hits[0]["source_block_ids"], ["p7-b2"])
+        self.assertEqual(
+            result.data["gate_decision"]["evidence_bundle_id"],
+            result.data["evidence_bundle_id"],
+        )
 
     def test_audit_tool_wraps_existing_auditor_with_complete_artifact(self) -> None:
         pipeline = FakeCitationAuditPipeline()
@@ -195,10 +201,12 @@ class FacadeTests(unittest.TestCase):
             "source": "Paper A",
         }
 
-        result = tool.audit_answer(answer, [evidence])
+        bundle = EvidenceBundle.create(query="What improved?", evidence=[evidence])
+        result = tool.audit_answer(answer, bundle)
 
         self.assertEqual(result.status, "success")
         self.assertEqual(pipeline.received_hits[0]["chunk_id"], "paper-a::chunk-2")
+        self.assertEqual(result.data["evidence_bundle_id"], bundle.bundle_id)
 
 
 if __name__ == "__main__":

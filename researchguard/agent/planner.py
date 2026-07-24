@@ -61,6 +61,8 @@ class PlanStep:
     tool: str
     purpose: str
     optional: bool = False
+    parameters: Mapping[str, Any] | None = None
+    recovery_terminal: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -68,6 +70,8 @@ class PlanStep:
             "tool": self.tool,
             "purpose": self.purpose,
             "optional": self.optional,
+            "parameters": copy.deepcopy(dict(self.parameters or {})),
+            "recovery_terminal": self.recovery_terminal,
         }
 
 

@@ -31,6 +31,10 @@ class ResearchAgentStateTests(unittest.TestCase):
                     "provenance": {},
                 }
             ],
+            evidence_bundle={"bundle_id": "evidence-test"},
+            gate_decision={"status": "strong"},
+            plan_revisions=[{"reason": "expanded_retrieval_after_miss"}],
+            retrieval_options={"candidate_k": 160},
             status="planned",
         )
 
@@ -43,6 +47,12 @@ class ResearchAgentStateTests(unittest.TestCase):
         self.assertEqual(payload["workflow_result"]["status"], "success")
         self.assertTrue(payload["memory_status"]["persisted"])
         self.assertEqual(payload["evidence"][0]["chunk_id"], "paper::chunk-1")
+        self.assertEqual(payload["evidence_bundle"]["bundle_id"], "evidence-test")
+        self.assertEqual(payload["gate_decision"]["status"], "strong")
+        self.assertEqual(
+            payload["plan_revisions"][0]["reason"],
+            "expanded_retrieval_after_miss",
+        )
 
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "agent_state.json"

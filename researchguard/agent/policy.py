@@ -11,6 +11,7 @@ class AgentPolicy:
     max_steps: int = 6
     max_tool_calls: int = 10
     max_retry: int = 2
+    max_plan_revisions: int = 2
     timeout: float = 120.0
 
     def __post_init__(self) -> None:
@@ -20,6 +21,8 @@ class AgentPolicy:
             raise ValueError("max_tool_calls must be positive.")
         if self.max_retry < 0:
             raise ValueError("max_retry must not be negative.")
+        if self.max_plan_revisions < 0:
+            raise ValueError("max_plan_revisions must not be negative.")
         if self.timeout <= 0:
             raise ValueError("timeout must be positive.")
 
@@ -35,6 +38,8 @@ class AgentPolicy:
             return "max_steps_exceeded"
         if len(state.tool_history) >= self.max_tool_calls:
             return "max_tool_calls_exceeded"
+        if len(state.plan_revisions) > self.max_plan_revisions:
+            return "max_plan_revisions_exceeded"
         return None
 
     def can_retry(self, retry_count: int) -> bool:

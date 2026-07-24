@@ -2,66 +2,56 @@
 from __future__ import annotations
 
 import unittest
-from pathlib import Path
 
-from researchguard.pipeline import PipelineSettings, ResearchGuardPipeline
-from researchguard.retrieval.evidence_judge import EvidenceSufficiencyResult
-from researchguard.retrieval.models import MetadataFilter, RetrievalHit, RetrievalResponse
+from researchguard.retrieval.answer_generator import (
+    AnswerCitation,
+    AnswerGenerationResult,
+)
+from researchguard.tools import EvidenceBundle, GateDecision
 from researchguard.tools.answer_tool import GuardedAnswerTool
 
 
-def _hit() -> RetrievalHit:
-    return RetrievalHit(
-        rank=1,
-        chunk_id="doc-a::chunk-1",
-        doc_id="doc-a",
-        title="Paper A",
-        section="method",
-        section_heading="Method",
-        heading_path=["Method"],
-        chunk_type="text",
-        page_start=3,
-        page_end=3,
-        source_block_ids=["p3-b1"],
-        overlap_source_block_ids=[],
-        content_types=["paragraph"],
-        has_equation=False,
-        has_table=False,
-        has_caption=False,
-        text="This passage is related but does not fully answer the question.",
-    )
+EVIDENCE = {
+    "chunk_id": "doc-a::chunk-1",
+    "doc_id": "doc-a",
+    "section": "method",
+    "page": 3,
+    "content": "CRAG uses a retrieval evaluator before generation.",
+    "source": "Paper A",
+    "provenance": {"source_block_ids": ["p3-b1"]},
+}
 
 
-class FakeRetrievalEngine:
-    embedding_provider = None
+class RecordingAnswerPipeline:
+    def __init__(self) -> None:
+        self.call_count = 0
+        self.received_hits: list[dict[str, object]] = []
 
-    def retrieve(self, query: str, **_: object) -> RetrievalResponse:
-        return RetrievalResponse(
-            query=query,
-            mode="hybrid",
-            top_k=10,
-            candidate_k=80,
-            filters=MetadataFilter(),
-            hits=[_hit()],
-            latency_ms=1.0,
-            retrieval_latency_ms=1.0,
-            total_latency_ms=1.0,
-            trace={},
-        )
-
-
-class FakeEvidencePipeline:
-    def __init__(self, support_level: str):
-        self.support_level = support_level
-
-    def assess(self, query: str, hits: object, *, read_cache: bool) -> EvidenceSufficiencyResult:
-        del query, hits, read_cache
-        return EvidenceSufficiencyResult(
-            answerable=self.support_level == "strong",
-            support_level=self.support_level,
+    def generate(
+        self,
+        query: str,
+        hits: list[dict[str, object]],
+        sufficiency: object,
+        *,
+        read_cache: bool,
+    ) -> AnswerGenerationResult:
+        del query, sufficiency, read_cache
+        self.call_count += 1
+        self.received_hits = hits
+        return AnswerGenerationResult(
+            answer="CRAG evaluates retrieval quality.",
+            citations=(
+                AnswerCitation(
+                    chunk_id=EVIDENCE["chunk_id"],
+                    doc_id=EVIDENCE["doc_id"],
+                    section=EVIDENCE["section"],
+                    page=EVIDENCE["page"],
+                ),
+            ),
             confidence=0.9,
-            reason=f"synthetic_{self.support_level}",
-            supporting_chunk_ids=("doc-a::chunk-1",),
+            refused=False,
+            refusal_reason=None,
+            evidence_chunk_ids=(EVIDENCE["chunk_id"],),
             model="synthetic",
             prompt_version="test",
             config_version="test",
@@ -76,46 +66,19 @@ class FakeEvidencePipeline:
         )
 
 
-class ForbiddenAnswerPipeline:
-    def __init__(self) -> None:
-        self.call_count = 0
-
-    def generate(self, *_: object, **__: object) -> object:
-        self.call_count += 1
-        raise AssertionError("Answer generation must not run after a failed evidence gate.")
+def bundle() -> EvidenceBundle:
+    return EvidenceBundle.create(query="How does CRAG work?", evidence=[EVIDENCE])
 
 
-class ForbiddenAuditPipeline:
-    def __init__(self) -> None:
-        self.call_count = 0
-
-    def audit(self, *_: object, **__: object) -> object:
-        self.call_count += 1
-        raise AssertionError("Citation audit must not run when no answer was generated.")
-
-
-def _settings() -> PipelineSettings:
-    placeholder = Path("unused.yaml")
-    return PipelineSettings(
-        schema_version="researchguard_pipeline_v1",
-        config_version="test",
-        read_cache=False,
-        include_retrieval_text=True,
-        rewrite_enabled=False,
-        multi_query_enabled=False,
-        retrieval_enabled=True,
-        retrieval_config_path=placeholder,
-        retrieval_mode="hybrid",
-        retrieval_top_k=10,
-        retrieval_candidate_k=80,
-        reranker_enabled=False,
-        reranker_candidate_k=20,
-        evidence_check_enabled=True,
-        evidence_config_path=placeholder,
-        answer_generation_enabled=True,
-        answer_config_path=placeholder,
-        citation_audit_enabled=True,
-        citation_audit_config_path=placeholder,
+def gate(value: EvidenceBundle, status: str) -> GateDecision:
+    supporting = (EVIDENCE["chunk_id"],) if status in {"strong", "partial"} else ()
+    return GateDecision(
+        status=status,
+        reason=f"synthetic_{status}",
+        supporting_chunk_ids=supporting,
+        evidence_bundle_id=value.bundle_id,
+        confidence=0.9,
+        answerable=status == "strong",
     )
 
 
@@ -123,32 +86,58 @@ class GateBypassTests(unittest.TestCase):
     def test_unsupported_and_partial_cannot_reach_answer_generator(self) -> None:
         for support_level in ("unsupported", "partial"):
             with self.subTest(support_level=support_level):
-                answer = ForbiddenAnswerPipeline()
-                audit = ForbiddenAuditPipeline()
-                pipeline = ResearchGuardPipeline(
-                    _settings(),
-                    retrieval_engine=FakeRetrievalEngine(),
-                    evidence_pipeline=FakeEvidencePipeline(support_level),
-                    answer_pipeline=answer,
-                    citation_audit_pipeline=audit,
-                )
-                tool = GuardedAnswerTool(pipeline=pipeline)
+                answer_pipeline = RecordingAnswerPipeline()
+                evidence_bundle = bundle()
+                tool = GuardedAnswerTool(answer_pipeline=answer_pipeline)
 
-                result = tool.generate_grounded_answer("What is supported?")
+                result = tool.generate_grounded_answer(
+                    evidence_bundle,
+                    gate(evidence_bundle, support_level),
+                )
 
                 self.assertEqual(result.status, "rejected")
-                self.assertEqual(
-                    result.data["pipeline_result"]["final_status"],
-                    "rejected",
-                )
-                self.assertEqual(answer.call_count, 0)
-                self.assertEqual(audit.call_count, 0)
+                self.assertEqual(answer_pipeline.call_count, 0)
 
-    def test_tool_has_no_raw_generation_method(self) -> None:
-        tool = GuardedAnswerTool(pipeline=object())
+    def test_strong_gate_reuses_bundle_without_retrieval_or_rejudging(self) -> None:
+        answer_pipeline = RecordingAnswerPipeline()
+        evidence_bundle = bundle()
+        tool = GuardedAnswerTool(answer_pipeline=answer_pipeline)
 
-        self.assertFalse(hasattr(tool, "generate_answer"))
-        self.assertTrue(hasattr(tool, "generate_grounded_answer"))
+        result = tool.generate_grounded_answer(
+            evidence_bundle,
+            gate(evidence_bundle, "strong"),
+        )
+
+        self.assertEqual(result.status, "success")
+        self.assertEqual(answer_pipeline.call_count, 1)
+        self.assertEqual(
+            answer_pipeline.received_hits[0]["chunk_id"],
+            EVIDENCE["chunk_id"],
+        )
+        self.assertEqual(
+            result.data["evidence_bundle_id"],
+            evidence_bundle.bundle_id,
+        )
+        self.assertNotIn("pipeline_result", result.data)
+        self.assertFalse(hasattr(tool, "_guarded_pipeline"))
+
+    def test_gate_for_another_bundle_is_rejected_before_generation(self) -> None:
+        answer_pipeline = RecordingAnswerPipeline()
+        evidence_bundle = bundle()
+        other = EvidenceBundle.create(
+            query="Different question",
+            evidence=[EVIDENCE],
+        )
+        tool = GuardedAnswerTool(answer_pipeline=answer_pipeline)
+
+        result = tool.generate_grounded_answer(
+            evidence_bundle,
+            gate(other, "strong"),
+        )
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.reason, "invalid_answer_input")
+        self.assertEqual(answer_pipeline.call_count, 0)
 
 
 if __name__ == "__main__":

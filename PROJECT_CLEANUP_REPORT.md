@@ -1,5 +1,15 @@
 # ResearchGuard Final Cleanup v1
 
+## Agent Intelligence Upgrade v1 Addendum
+
+The two orphan Git links recorded by this historical audit have now been remediated:
+
+- `EvidenceClaw` and `rag_agent_harness` were removed from the parent repository index with `git rm --cached`.
+- Their local nested repositories were not deleted and are now excluded by root `.gitignore` rules.
+- Fresh GitHub checkouts no longer contain inaccessible mode `160000` entries without `.gitmodules` mappings.
+
+The remaining classifications below describe the repository at the time of the original cleanup audit.
+
 ## 1. Audit Scope and Conclusion
 
 本报告基于当前 working tree、Git tracked files、Python AST import、CLI 入口、Pipeline 入口、Demo 入口、validation/build scripts、YAML 配置引用和 README 引用进行静态审计。
@@ -32,8 +42,8 @@ data/                            7 tracked evaluation JSONL files; generated ass
 outputs/                         Generated validation reports; ignored by Git
 frontend/streamlit_app.py        Retained legacy frontend entry
 main.py                          Retained legacy root entry
-EvidenceClaw                     Retained orphan Git link
-rag_agent_harness                Retained orphan Git link
+EvidenceClaw                     Historical orphan Git link; removed from public index in Agent Intelligence Upgrade v1
+rag_agent_harness                Historical orphan Git link; removed from public index in Agent Intelligence Upgrade v1
 ```
 
 本地规模快照：
@@ -298,7 +308,7 @@ main.py                      LEGACY - earlier root entry, not used by unified CL
 - `researchguard/audit/` and `researchguard/reporting/audit_report.py` remain reachable from `researchguard.cli smoke-audit`.
 - `researchguard/agent/`, `memory/`, old evaluation/reporting and old parser helpers form a historical implementation set with internal dependencies.
 - `scripts/run_functional_validation.py` and `run_local_rag_validation.py` exercise that historical set.
-- `EvidenceClaw` and `rag_agent_harness` are tracked as Git mode `160000`, but `.gitmodules` has no mapping. They are not imported by current code. Removing or repairing them changes repository history/structure and requires a separate confirmed migration.
+- `EvidenceClaw` and `rag_agent_harness` were tracked as Git mode `160000` without `.gitmodules` mappings. Agent Intelligence Upgrade v1 completed the confirmed migration by removing only the parent-index entries while retaining and ignoring the local nested repositories.
 - Empty `tests/` is not deleted because current executable validations intentionally live under `scripts/`; a later test-runner migration should be atomic.
 - Some active YAML paths are machine-specific; changing them without a path migration test could break current local validation.
 

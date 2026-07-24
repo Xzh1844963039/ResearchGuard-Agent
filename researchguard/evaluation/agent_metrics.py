@@ -1,6 +1,7 @@
 # C:\Users\18449\Desktop\researchguard_workspace\researchguard\evaluation\agent_metrics.py
 from __future__ import annotations
 
+import json
 from collections import Counter
 from datetime import datetime
 from typing import Any, Iterable, Mapping
@@ -53,6 +54,7 @@ def tool_metrics(
     *,
     expected_tools: Iterable[str] = (),
     forbidden_tools: Iterable[str] = (),
+    allow_failed_calls: bool = False,
 ) -> dict[str, MetricValue]:
     calls = list(tool_calls)
     names = [str(call.get("tool_name", call.get("tool", ""))) for call in calls]
@@ -71,7 +73,7 @@ def tool_metrics(
             "tool_success_rate",
             "tool",
             successes / len(calls) if calls else 1.0,
-            successes == len(calls),
+            successes == len(calls) or allow_failed_calls,
             {"success_count": successes, "tool_call_count": len(calls)},
         ),
         "tool_call_count": MetricValue(
@@ -163,6 +165,107 @@ def efficiency_metrics(state: Any) -> dict[str, MetricValue]:
             "efficiency",
             sum(_api_calls(call) for call in tool_calls),
             None,
+        ),
+    }
+
+
+def intelligence_metrics(
+    state: Any,
+    *,
+    expected_plan_revisions: int | None = None,
+) -> dict[str, MetricValue]:
+    calls = list(getattr(state, "tool_history", ()))
+    revisions = list(getattr(state, "plan_revisions", ()))
+    final_status = str(getattr(state, "status", ""))
+    signatures: list[str] = []
+    duplicates = 0
+    for call in calls:
+        signature = json.dumps(
+            {
+                "tool_name": call.get("tool_name", call.get("tool", "")),
+                "input_summary": call.get("input_summary", {}),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if signature in signatures:
+            duplicates += 1
+        signatures.append(signature)
+
+    source_bundle_ids = {
+        str(call.get("evidence_bundle_id"))
+        for call in calls
+        if str(call.get("tool_name", "")) in {"retrieve_evidence", "assess_evidence"}
+        and call.get("evidence_bundle_id")
+    }
+    answer_calls = [
+        call
+        for call in calls
+        if str(call.get("tool_name", ""))
+        in {"generate_grounded_answer", "audit_answer"}
+    ]
+    reused = sum(
+        bool(call.get("evidence_bundle_id"))
+        and str(call.get("evidence_bundle_id")) in source_bundle_ids
+        for call in answer_calls
+    )
+    return {
+        "replanning_rate": MetricValue(
+            "replanning_rate",
+            "agent_intelligence",
+            float(bool(revisions)),
+            None,
+            {"revision_count": len(revisions)},
+        ),
+        "successful_recovery_rate": MetricValue(
+            "successful_recovery_rate",
+            "agent_intelligence",
+            float(final_status == "completed") if revisions else None,
+            None,
+            {"applicable": bool(revisions), "final_status": final_status},
+        ),
+        "average_plan_revision": MetricValue(
+            "average_plan_revision",
+            "agent_intelligence",
+            len(revisions),
+            None,
+        ),
+        "plan_revision_accuracy": MetricValue(
+            "plan_revision_accuracy",
+            "agent_intelligence",
+            (
+                None
+                if expected_plan_revisions is None
+                else float(len(revisions) == expected_plan_revisions)
+            ),
+            (
+                None
+                if expected_plan_revisions is None
+                else len(revisions) == expected_plan_revisions
+            ),
+            {
+                "expected": expected_plan_revisions,
+                "observed": len(revisions),
+            },
+        ),
+        "duplicate_tool_call_rate": MetricValue(
+            "duplicate_tool_call_rate",
+            "agent_intelligence",
+            duplicates / len(calls) if calls else 0.0,
+            duplicates == 0,
+            {"duplicate_count": duplicates, "tool_call_count": len(calls)},
+        ),
+        "evidence_reuse_rate": MetricValue(
+            "evidence_reuse_rate",
+            "agent_intelligence",
+            reused / len(answer_calls) if answer_calls else None,
+            reused == len(answer_calls) if answer_calls else None,
+            {
+                "reused_calls": reused,
+                "answer_and_audit_calls": len(answer_calls),
+                "source_bundle_ids": sorted(source_bundle_ids),
+            },
         ),
     }
 

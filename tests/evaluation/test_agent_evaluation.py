@@ -39,6 +39,18 @@ def tool_history(names: tuple[str, ...], *, rejected_last: bool = False) -> list
             "output_status": "rejected" if rejected_last and index == len(names) else "success",
             "latency_ms": 1.0,
             "trace_id": f"trace-{index}",
+            "input_summary": {"case_step": index},
+            "evidence_bundle_id": (
+                "evidence-benchmark"
+                if name
+                in {
+                    "retrieve_evidence",
+                    "assess_evidence",
+                    "generate_grounded_answer",
+                    "audit_answer",
+                }
+                else None
+            ),
         }
         for index, name in enumerate(names, start=1)
     ]
@@ -134,6 +146,8 @@ class AgentEvaluationTests(unittest.TestCase):
         self.assertEqual(report.aggregate_metrics["invalid_tool_rate"], 0.0)
         self.assertEqual(report.aggregate_metrics["provenance_validity"], 1.0)
         self.assertEqual(report.aggregate_metrics["memory_persistence_success"], 1.0)
+        self.assertEqual(report.aggregate_metrics["duplicate_tool_call_rate"], 0.0)
+        self.assertEqual(report.aggregate_metrics["evidence_reuse_rate"], 1.0)
 
     def test_detects_wrong_plan_invalid_tool_and_bad_provenance(self) -> None:
         state = ResearchAgentState(

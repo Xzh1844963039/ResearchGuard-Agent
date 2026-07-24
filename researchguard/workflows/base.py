@@ -8,7 +8,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
-from researchguard.tools import EvidenceRecord, ToolError, ToolRegistry, ToolResult
+from researchguard.tools import (
+    EvidenceBundle,
+    EvidenceRecord,
+    GateDecision,
+    ToolError,
+    ToolRegistry,
+    ToolResult,
+)
 
 
 WORKFLOW_RESULT_SCHEMA_VERSION = "researchguard.workflow_result.v1"
@@ -198,6 +205,12 @@ class ResearchWorkflow(ABC):
         result: ToolResult,
     ) -> None:
         input_summary = self._input_summary(tool_input)
+        bundle_payload = result.data.get("evidence_bundle")
+        output_bundle_id = (
+            bundle_payload.get("bundle_id")
+            if isinstance(bundle_payload, Mapping)
+            else None
+        )
         history = {
             "workflow_name": self.workflow_name,
             "tool_name": tool_name,
@@ -206,6 +219,12 @@ class ResearchWorkflow(ABC):
             "latency_ms": result.latency_ms,
             "timestamp": result.timestamp,
             "trace_id": result.trace_id,
+            "api_call_count": self._api_call_count(result.data),
+            "evidence_bundle_id": (
+                result.data.get("evidence_bundle_id")
+                or output_bundle_id
+                or input_summary.get("evidence_bundle_id")
+            ),
         }
         state.tool_history.append(history)
         observation = {
@@ -238,6 +257,17 @@ class ResearchWorkflow(ABC):
             query = str(tool_input["query"])
             summary["query_preview"] = query[:120]
             summary["query_length"] = len(query)
+        for key in (
+            "top_k",
+            "candidate_k",
+            "rewrite",
+            "multi_query",
+            "read_cache",
+            "filters",
+            "limit",
+        ):
+            if key in tool_input:
+                summary[key] = copy.deepcopy(tool_input[key])
         evidence = tool_input.get("evidence")
         if isinstance(evidence, list):
             summary["evidence_count"] = len(evidence)
@@ -246,6 +276,14 @@ class ResearchWorkflow(ABC):
                 for item in evidence
                 if isinstance(item, Mapping) and item.get("chunk_id")
             ]
+        evidence_bundle = tool_input.get("evidence_bundle")
+        if isinstance(evidence_bundle, Mapping):
+            records = evidence_bundle.get("evidence_records", [])
+            summary["evidence_bundle_id"] = evidence_bundle.get("bundle_id")
+            summary["evidence_count"] = len(records) if isinstance(records, list) else 0
+        gate = tool_input.get("gate_decision")
+        if isinstance(gate, Mapping):
+            summary["gate_status"] = gate.get("status")
         answer = tool_input.get("answer")
         if isinstance(answer, Mapping):
             summary["answer_length"] = len(str(answer.get("answer", "")))
@@ -255,6 +293,17 @@ class ResearchWorkflow(ABC):
             sources = tool_input["sources"]
             summary["sources"] = [sources] if isinstance(sources, str) else list(sources)
         return summary
+
+    @staticmethod
+    def _api_call_count(value: Any) -> int:
+        if isinstance(value, Mapping):
+            direct = value.get("api_call_count")
+            if isinstance(direct, int) and not isinstance(direct, bool):
+                return max(0, direct)
+            return sum(ResearchWorkflow._api_call_count(item) for item in value.values())
+        if isinstance(value, (list, tuple)):
+            return sum(ResearchWorkflow._api_call_count(item) for item in value)
+        return 0
 
     def _finish(
         self,
@@ -291,23 +340,64 @@ class ResearchWorkflow(ABC):
             records.append(record.to_dict())
         return records
 
-    @staticmethod
-    def _guarded_artifacts(
+    @classmethod
+    def _bundle_from_result(
+        cls,
         result: ToolResult,
-    ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any] | None]:
-        pipeline_result = result.data.get("pipeline_result")
-        if not isinstance(pipeline_result, Mapping):
-            raise WorkflowExecutionError("Guarded Answer Tool did not return a pipeline result.")
-        answer_stage = pipeline_result.get("answer_generation")
-        retrieval_stage = pipeline_result.get("retrieval")
-        audit_stage = pipeline_result.get("citation_audit")
-        answer = answer_stage.get("output") if isinstance(answer_stage, Mapping) else None
-        retrieval = retrieval_stage.get("output") if isinstance(retrieval_stage, Mapping) else None
-        audit = audit_stage.get("output") if isinstance(audit_stage, Mapping) else None
-        if not isinstance(answer, Mapping) or not isinstance(retrieval, Mapping):
-            raise WorkflowExecutionError("Guarded Answer Tool returned incomplete artifacts.")
-        hits = retrieval.get("hits", [])
-        if not isinstance(hits, list):
-            raise WorkflowExecutionError("Guarded Answer Tool returned invalid retrieval hits.")
-        evidence = [EvidenceRecord.from_mapping(hit).to_dict() for hit in hits]
-        return dict(answer), evidence, dict(audit) if isinstance(audit, Mapping) else None
+        *,
+        query: str,
+    ) -> EvidenceBundle:
+        value = result.data.get("evidence_bundle")
+        if isinstance(value, Mapping):
+            return EvidenceBundle.from_mapping(value)
+        evidence = cls._evidence_from_result(result)
+        if not evidence:
+            raise WorkflowExecutionError("Retrieval returned no canonical evidence.")
+        return EvidenceBundle.create(
+            query=query,
+            evidence=evidence,
+            provenance={"source": "workflow_legacy_retrieval_result"},
+        )
+
+    @staticmethod
+    def _gate_from_result(
+        result: ToolResult,
+        *,
+        bundle: EvidenceBundle,
+    ) -> GateDecision:
+        value = result.data.get("gate_decision")
+        if isinstance(value, Mapping):
+            gate = GateDecision.from_mapping(value)
+        else:
+            assessment = result.data.get("assessment")
+            if not isinstance(assessment, Mapping):
+                raise WorkflowExecutionError(
+                    "Evidence Tool returned no GateDecision or assessment."
+                )
+            gate = GateDecision.from_assessment(
+                evidence_bundle_id=bundle.bundle_id,
+                assessment=assessment,
+            )
+        if gate.evidence_bundle_id != bundle.bundle_id:
+            raise WorkflowExecutionError(
+                "Evidence Tool returned a GateDecision for another bundle."
+            )
+        return gate
+
+    @staticmethod
+    def _answer_from_result(
+        result: ToolResult,
+        *,
+        bundle: EvidenceBundle,
+    ) -> dict[str, Any]:
+        answer = result.data.get("answer", result.data.get("answer_artifact"))
+        if not isinstance(answer, Mapping):
+            raise WorkflowExecutionError(
+                "Answer Tool returned no complete answer artifact."
+            )
+        bundle_id = result.data.get("evidence_bundle_id")
+        if bundle_id != bundle.bundle_id:
+            raise WorkflowExecutionError(
+                "Answer Tool returned an artifact from another evidence bundle."
+            )
+        return copy.deepcopy(dict(answer))

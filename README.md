@@ -6,7 +6,7 @@
 
 ResearchGuard 是一个面向科研论文的多文档 RAG 工程。它不止返回与问题相似的段落，而是把版面解析、section-aware chunking、混合检索、Cross-Encoder 精排、查询改写、证据充分性判断、受证据约束的回答生成和逐 claim 引用核验串成一条可审计流程。
 
-当前 Evidence Engine 主流程已经完成本地集成与验证；v2 在其上增加了 Tool Facade、受约束的单 Agent Controller、Scholarly Discovery、Research Workflow Skills、Research Memory 与 Evidence Ledger，以及 Agent Trace 和 Agent Evaluation。历史 Agent 和早期 Audit 代码仍保留用于兼容；历史 `MemoryStore` 也继续服务迁移代码，但不承担当前 Controller 的科研过程记忆。
+当前 Evidence Engine 主流程已经完成本地集成与验证；v2 在其上增加了 Tool Facade、受约束的单 Agent Controller、Scholarly Discovery、Research Workflow Skills、Research Memory 与 Evidence Ledger、Agent Trace、Agent Evaluation，以及 Agent Intelligence Upgrade v1。最新 Agent 路径使用单一 Evidence Artifact，并支持受预算约束的 observation-driven replanning。历史 Agent 和早期 Audit 代码仍保留用于兼容；历史 `MemoryStore` 也继续服务迁移代码，但不承担当前 Controller 的科研过程记忆。
 
 ## Architecture
 
@@ -30,7 +30,7 @@ flowchart LR
 
 ## Agent-ready Architecture
 
-ResearchGuard v2 已完成 **Phase 0 + Phase 1：Evidence Engine Contract + Agent Tool Facade**、**Phase 2：Bounded Single-Agent Controller v1**、**Phase 3：Scholarly Discovery Tools v1**、**Phase 4：Research Workflow Skills v1**、**Phase 5：Research Memory + Evidence Ledger v1** 和 **Phase 6：Research Agent Evaluation + Productization v1**。这些新增层不改变既有 Parser、Chunking、Indexing、Retrieval 或统一 Pipeline 的核心逻辑。
+ResearchGuard v2 已完成 Evidence Contract、Tool Facade、Bounded Controller、Scholarly Discovery、Research Workflow Skills、Research Memory、Agent Evaluation，以及 **Agent Intelligence Upgrade v1**。升级没有改变 Parser、Chunking、Indexing、Retrieval 算法或统一 Evidence Pipeline，而是修正了 Agent 层的数据流、有限重规划与评测可信度。
 
 ```mermaid
 flowchart TD
@@ -53,16 +53,21 @@ flowchart TD
     Compare --> Registry
     Claim --> Registry
     Registry --> RetrievalTool["retrieve_evidence"]
-    Registry --> EvidenceTool["assess_evidence"]
-    Registry --> AnswerTool["generate_grounded_answer"]
-    Registry --> AuditTool["audit_answer"]
+    RetrievalTool --> Bundle["EvidenceBundle"]
+    Bundle --> EvidenceTool["assess_evidence"]
+    EvidenceTool --> GateDecision["GateDecision"]
+    Bundle --> AnswerTool["generate_grounded_answer"]
+    GateDecision --> AnswerTool
+    AnswerTool --> Artifact["AnswerArtifact"]
+    Artifact --> AuditTool["audit_answer"]
+    Bundle --> AuditTool
     Registry --> ScholarTool["search_scholarly_sources"]
     RetrievalTool --> Core["ResearchGuard Core"]
     EvidenceTool --> Core
-    AnswerTool --> Pipeline["Frozen Unified Pipeline"]
+    AnswerTool --> Generator["Existing AnswerGenerationPipeline"]
     AuditTool --> Core
     ScholarTool --> Candidates["Candidate Paper Metadata"]
-    Pipeline --> Core
+    Generator --> Core
     Controller --> Trace["Agent Trace"]
     Trace --> Evaluation["Agent Evaluation"]
     Trace --> Demo["CLI / Streamlit Demo v2"]
@@ -72,6 +77,8 @@ flowchart TD
 
 - `ToolResult`：统一记录 `status`、`message/reason`、UTC timestamp、latency、tool name/version、trace ID、data 与结构化 error。
 - `EvidenceRecord`：保留 canonical `chunk_id`、`doc_id`、`section`、`page`、content、source、score 与完整 provenance，不引入其他证据 ID 替代现有 chunk ID。
+- `EvidenceBundle`：封装 query、不可重复的 EvidenceRecord、retrieval metadata、provenance 与基于规范内容计算的稳定 `bundle_id`。
+- `GateDecision`：记录 `strong/partial/unsupported`、reason、supporting chunk IDs 和对应 `evidence_bundle_id`，防止 gate 与生成证据错配。
 - `ToolError`：统一表达 invalid input、API failure、timeout、retrieval failure 与 execution failure。
 - 所有契约带 schema version，并可直接序列化为 JSON。
 
@@ -79,10 +86,10 @@ Tool Facade 位于 `researchguard/tools/`：
 
 | Tool | 包装的既有能力 | 安全边界 |
 |---|---|---|
-| `retrieve_evidence` | Query Rewrite、Hybrid Retrieval、Chroma、Reranker | 不复制召回或排序逻辑，输出 canonical evidence 与 ranking provenance |
-| `assess_evidence` | Evidence Sufficiency | 保持 `strong` / `partial` / `unsupported`，fallback 时 fail closed |
-| `generate_grounded_answer` | `ResearchGuardPipeline` | 不暴露裸 `generate_answer`；必须经过 Evidence Gate、Answer Generation 与 Citation Audit |
-| `audit_answer` | Citation Audit | 只接受完整 `AnswerGenerationResult` 或其序列化 artifact，拒绝缺少引用 provenance 的裸答案字符串 |
+| `retrieve_evidence` | Query Rewrite、Hybrid Retrieval、Chroma、Reranker | 输出 canonical evidence 和稳定 EvidenceBundle，不复制召回或排序逻辑 |
+| `assess_evidence` | Evidence Sufficiency | 只评估给定 EvidenceBundle，输出绑定同一 bundle ID 的 GateDecision |
+| `generate_grounded_answer` | `AnswerGenerationPipeline` | 只接受 EvidenceBundle + strong GateDecision；不能调用 Retrieval、Evidence Judge 或统一 Pipeline |
+| `audit_answer` | Citation Audit | 只审计 AnswerArtifact 与同源 EvidenceBundle；拒绝 bundle 外 citation 或裸答案字符串 |
 | `search_scholarly_sources` | arXiv / OpenAlex metadata APIs | 只返回 `metadata_only=true` 的候选论文，不产生 EvidenceRecord |
 
 `researchguard/tools/registry.py` 提供可枚举、可注册、可统一调用的 Tool Registry。默认 Registry 包含上述五个受控接口，依赖在首次调用时加载。Phase 2 Controller 只能通过该 Registry 调用能力，不直接 import Retrieval、Answer Generator 或 Citation Audit 的内部实现。
@@ -93,12 +100,13 @@ Tool Facade 位于 `researchguard/tools/`：
 
 Phase 2 位于 `researchguard/agent/`：
 
-- `state.py`：定义带 schema version 的 `ResearchAgentState`，记录 query、task type、plan、workflow name/input/steps/result、tool trace、observations、evidence、answer、audit result 和状态时间；支持 JSON 保存与恢复。
+- `state.py`：定义带 schema version 的 `ResearchAgentState`，记录 query、task type、plan、plan revisions、workflow、EvidenceBundle、GateDecision、tool trace、observations、answer、audit result 和状态时间；支持 JSON 保存与恢复。
 - `planner.py`：使用确定性规则生成 structured plan；普通 `qa`、兼容 `comparison`、带完整 answer artifact 的 `audit` 和 `literature_search` 生成有限 Tool plan，科研任务则只选择已注册 Workflow。
-- `policy.py`：默认限制为 `max_steps=6`、`max_tool_calls=10`、`max_retry=2`、`timeout=120s`。
-- `controller.py`：执行 `plan → registry tool → observation → state update → stop decision`；Tool failure、Evidence 不足和 policy 超限均会终止。
+- `replanner.py`：根据 retrieval miss、partial evidence 和 retrieval failure 生成版本化 `PlanRevision`，记录 previous plan、observation、new plan 与 reason。
+- `policy.py`：默认限制为 `max_steps=6`、`max_tool_calls=10`、`max_retry=2`、`max_plan_revisions=2`、`timeout=120s`。
+- `controller.py`：执行 `plan → registry tool → observation → state update → bounded replan/stop decision`；所有修订仍受 step、call、revision 和 timeout budget 约束。
 
-`qa` 和显式兼容模式 `comparison` 的固定有限流程为：
+`qa` 的初始有限流程为：
 
 ```text
 retrieve_evidence
@@ -107,9 +115,27 @@ retrieve_evidence
 → audit_answer
 ```
 
-如果 `assess_evidence` 返回 partial 或 unsupported，Controller 立即设置 `status="rejected"`，不会调用 Answer Tool。`audit` 任务要求调用方提供带 citation provenance 的 answer artifact；如果没有现成 evidence，可以先执行一次 retrieval。
+如果 `assess_evidence` 返回 unsupported，Controller 立即拒绝且不会调用 Answer Tool。partial evidence 最多触发一次扩大 `top_k/candidate_k` 的 retrieval；第二次仍非 strong 时拒绝。`audit` 任务要求调用方提供带 citation provenance 的 answer artifact；如果没有现成 evidence，可以先执行一次 retrieval。
 
-每次 Tool 调用都会记录 `tool_name`、输入摘要、输出状态、latency、timestamp 和 trace ID。当前 Planner 不调用 LLM，不做动态反思或开放式工具探索；项目也没有 Multi-Agent、LangGraph、autonomous browsing 或无限 ReAct loop。Phase 6 只向 Planner 提供受限的历史 run/paper/failure 摘要，不让历史答案改变当前答案。
+每次 Tool 调用都会记录 `tool_name`、输入摘要、输出状态、latency、API call count、EvidenceBundle ID、timestamp 和 trace ID。当前 Planner 不调用 LLM，不进行开放式工具探索；项目也没有 Multi-Agent、LangGraph、autonomous browsing 或无限 ReAct loop。Research Memory 只向 Planner 提供受限的历史 run/paper/failure 摘要，不让历史答案改变当前答案。
+
+## Adaptive Agent Loop
+
+Agent Intelligence Upgrade v1 将普通 QA 从固定执行升级为有限状态的 adaptive loop：
+
+```text
+Observation
+→ BoundedReplanner
+→ PlanRevision(previous_plan, observation, new_plan, reason)
+→ Next Tool Action
+```
+
+- Retrieval 返回 0 evidence、显式低 coverage 或 retrieval failure：第一次修订为 `rewrite/multi-query + expanded retrieval`。
+- 扩展 retrieval 仍无 corpus evidence：第二次修订为 scholarly metadata discovery；metadata 不会转成证据，Agent 安全拒绝。
+- Evidence Gate 返回 partial：增加 retrieval candidate 范围并重新判断；unsupported 不重规划，直接拒绝。
+- Answer、Audit 或未知 Tool 输出失败：不允许绕过 gate 或 citation audit，执行 safe stop。
+
+`PlanRevision` 会进入 `ResearchAgentState.plan_revisions` 和 `AgentTrace.plan_revisions`，Trace timeline 显示 `replan` 事件。该机制是受 `max_plan_revisions=2` 约束的规则式恢复，不是无限 ReAct，也不宣称开放式自主研究。
 
 ## Scholarly Discovery Tools
 
@@ -207,7 +233,7 @@ Phase 6 在 `researchguard/tracing/` 建立版本化 `AgentTrace`，统一记录
 - **Labeled evaluation**：`AgentEvaluationCase` 明确给出 expected task type、workflow、Tool sequence、forbidden tools、relevant evidence IDs 和 expected status，用于计算可判定的 planning/workflow accuracy。
 - **Runtime evaluation**：只检查当前 run 的 Tool、provenance、效率与 memory 健康度；没有 ground truth 时，task classification 和 workflow accuracy 明确返回 `null`，不会把执行成功冒充准确率。
 
-Agent Evaluation v1 覆盖五类指标：
+Agent Evaluation 现在覆盖六类指标：
 
 | Category | Metrics |
 |---|---|
@@ -216,8 +242,9 @@ Agent Evaluation v1 覆盖五类指标：
 | Evidence | provenance validity、evidence coverage、unsupported claim rate |
 | Efficiency | latency、step count、retry count、API call count |
 | Memory | persistence success、ledger completeness、failure recording |
+| Agent Intelligence | replanning rate、successful recovery rate、average plan revision、duplicate Tool call rate、evidence reuse rate |
 
-`scripts/validate_agent_evaluation_v1.py` 运行三个 deterministic synthetic cases：Literature Review、Paper Comparison 和 Claim Audit refusal，并把报告写入 `outputs/agent_evaluation_v1/`。该 benchmark 验证编排和 schema 不变量，不代表真实科研问题上的端到端质量。
+`scripts/validate_agent_evaluation_v1.py` 保留三个旧 deterministic state-level cases，用于兼容 schema regression。正式 Agent 集成评测入口是 `scripts/validate_agent_benchmark_v2.py`：30 个 case 均从 query 开始执行真实 Planner、Controller、Workflow 和 Tool Registry，禁止直接构造最终 state。该 benchmark 仍使用 deterministic Tool doubles，因此验证的是 Agent 控制逻辑，不代表外部 LLM 或真实科研问题上的回答质量。
 
 ## Key Features
 
@@ -247,17 +274,18 @@ researchguard/
   workflows/       Workflow contract、Registry 与三个科研工作流
   memory/          Research Run Store、Evidence Ledger、Failure Store 与历史兼容 MemoryStore
   tracing/         版本化 Agent Trace、collector 与 CLI formatter
-  evaluation/      Agent evaluation schema、metrics、evaluator 与 report renderer
+  evaluation/      Agent evaluation schema、adaptive metrics、evaluator 与 report renderer
   pipeline.py      v1 统一 Pipeline
   cli.py           命令行入口
-  agent/           Bounded Planner、Policy、State、Controller 与历史兼容代码
+  agent/           Bounded Planner、Replanner、Policy、State、Controller 与历史兼容代码
   audit/           历史规则式 audit，当前 claim audit 位于 retrieval/
 configs/           各阶段 YAML 配置
 scripts/           build、retrieve 与独立 validation 入口
 demo/              Streamlit Demo v2
+tests/agent/       Controller、Policy、State 与 bounded replanning tests
 tests/evaluation/  Agent benchmark 与 metric regression tests
 tests/tracing/     完整 trace 和 JSON/Markdown serialization tests
-data/eval/         纳入版本控制的评测标注
+data/eval/         纳入版本控制的阶段标注与 30-case Agent Benchmark v2
 data/parsed/       本地解析结果，不纳入 Git
 data/indexes/      本地索引，不纳入 Git
 data/cache/        本地模型/API 缓存，不纳入 Git
@@ -265,7 +293,7 @@ data/memory/       本地 Research Memory JSONL，不纳入 Git
 outputs/           本地验证报告，不纳入 Git
 ```
 
-`EvidenceClaw` 与 `rag_agent_harness` 是早期迁移遗留的 Git link，不在当前 Pipeline 依赖闭包内。完整文件分类与依赖审计见 [`PROJECT_CLEANUP_REPORT.md`](PROJECT_CLEANUP_REPORT.md)。
+早期迁移留下的 `EvidenceClaw` 与 `rag_agent_harness` orphan Git links 已从公开仓库索引移除；本机目录通过 `.gitignore` 保留，不再导致 GitHub checkout 出现不可访问链接。历史分类见 [`PROJECT_CLEANUP_REPORT.md`](PROJECT_CLEANUP_REPORT.md)。
 
 ## Installation
 
@@ -276,8 +304,10 @@ git clone https://github.com/Xzh1844963039/ResearchGuard-Agent.git
 cd ResearchGuard-Agent
 py -m venv .venv
 & ".\.venv\Scripts\Activate.ps1"
-python -m pip install -r requirements.txt
+python -m pip install -e .
 ```
+
+`pyproject.toml` 记录项目 metadata、Python 版本和直接运行依赖；`requirements.txt` 继续保留当前开发环境的完整 pinned snapshot。如需完全复现本机依赖，可继续执行 `python -m pip install -r requirements.txt`。
 
 需要调用 OpenAI 的阶段从环境变量读取凭据：
 
@@ -345,7 +375,7 @@ python -m researchguard.cli agent-run `
   --task-type claim_audit
 ```
 
-可使用 `--task-type qa|comparison|audit|literature_search|literature_review|paper_comparison|claim_audit` 覆盖确定性任务分类，并用 `--max-steps`、`--max-tool-calls`、`--max-retry` 和 `--timeout` 收紧 policy。`--workflow-input-json` 可以传入 paper name/`doc_id`、comparison dimensions、source preference 或 candidate limit。`audit` 任务必须通过 `--answer-json` 提供完整 answer artifact；可通过 `--evidence-json` 提供 canonical evidence。`--show-trace`、`--show-memory` 和 `--show-evaluation` 分别显示完整执行链、当前 run memory 与 runtime health metrics。`--output` 保存展示报告，`--state-output` 保存可恢复的完整 Agent state。
+可使用 `--task-type qa|comparison|audit|literature_search|literature_review|paper_comparison|claim_audit` 覆盖确定性任务分类，并用 `--max-steps`、`--max-tool-calls`、`--max-retry`、`--max-plan-revisions` 和 `--timeout` 收紧 policy。`--workflow-input-json` 可以传入 paper name/`doc_id`、comparison dimensions、source preference 或 candidate limit。`audit` 任务必须通过 `--answer-json` 提供完整 answer artifact；可通过 `--evidence-json` 提供 canonical evidence。`--show-trace`、`--show-memory` 和 `--show-evaluation` 分别显示完整执行链、当前 run memory 与 runtime health metrics。`--output` 保存展示报告，`--state-output` 保存可恢复的完整 Agent state。
 
 查看 Research Memory：
 
@@ -377,6 +407,14 @@ python scripts/validate_agent_evaluation_v1.py
 ```
 
 报告写入 `outputs/agent_evaluation_v1/agent_evaluation_report.json` 和 `agent_evaluation_report.md`；`outputs/` 不纳入 Git。
+
+运行 Agent Benchmark v2：
+
+```powershell
+python scripts/validate_agent_benchmark_v2.py
+```
+
+Benchmark v2 从 `data/eval/agent_benchmark_v2/cases.jsonl` 读取 30 条标注，真实执行 Planner、Controller、Workflow Registry 和 Tool Registry。它使用 deterministic Tool doubles，不调用外部 LLM，因此用于验证 routing、replanning、safety boundary 和数据流不变量，而不是衡量真实回答质量。报告写入 `outputs/agent_benchmark_v2/agent_benchmark_v2_report.json` 与 `agent_benchmark_v2_report.md`。
 
 ## Data Preparation
 
@@ -427,6 +465,10 @@ Phase 5 memory tests 覆盖 RunRecord JSON roundtrip、跨实例持久化、cano
 
 Phase 6 synthetic benchmark 的 3 个 case 全部通过：task classification accuracy `1.0000`、workflow selection accuracy `1.0000`、invalid Tool rate `0.0000`、Tool success rate `1.0000`、provenance validity `1.0000`、evidence coverage `1.0000`、unnecessary Tool calls `0`、unsupported claim rate `0.0000`。测试同时覆盖 completed run 的 Evidence Ledger 和 rejected run 的 Failure Store；这些数字只描述 deterministic synthetic cases。
 
+Agent Benchmark v2 的 30 个 integration cases 全部通过：task/workflow accuracy `1.0000`、plan revision accuracy `1.0000`、invalid Tool rate `0.0000`、duplicate Tool call rate `0.0000`、provenance validity `1.0000`、evidence reuse rate `1.0000`。12/30 case 发生重规划，平均 `0.4667` 次 revision；需要恢复的 case 中 `successful_recovery_rate=0.6667`，其余恢复路径按设计安全拒绝。Benchmark 包含 10 个 task routing、10 个 replanning 和 10 个 safety boundary case。当前全量 unittest 为 86/86 PASS。
+
+`.github/workflows/test.yml` 在 push 和 pull request 上安装 `pyproject.toml` 依赖，并运行 `python -m compileall researchguard` 与 `python -m unittest discover -s tests`。
+
 可重复运行的验证入口位于 `scripts/validate_*_v1.py` 和 `scripts/validate_parser_v5.py`。验证会读取本地 data/index/cache，并可能更新被 `.gitignore` 排除的 `outputs/`。
 
 ## Design Decisions
@@ -440,11 +482,11 @@ Phase 6 synthetic benchmark 的 3 个 case 全部通过：task classification ac
 
 ## Limitations
 
-- 当前 Planner 是确定性有限 Planner，不进行 LLM task decomposition、动态 re-planning 或开放式工具选择。
-- `generate_grounded_answer` 复用完整统一 Pipeline，因此会自行完成检索到审计的全流程；Controller 的显式 `audit_answer` 步骤使用该 Tool 输出中的同源 answer artifact 与 generation evidence，当前会形成一次可缓存的重复审计。
+- 当前初始 Planner 仍是确定性规则分类，不进行 LLM task decomposition 或开放式工具选择；Replanner 只处理三类已定义 observation，不能为任意科研任务创造新策略。
+- `generate_grounded_answer` 已消除内部重复 retrieval/judge/audit，但同步 Answer Generator 仍依赖外部 API timeout，Controller 无法抢占正在执行的同步调用。
 - Literature Review 的外部候选 metadata 不会自动下载、解析或进入本地 corpus，因此只列出 discovery candidates；它不会扩大当前可回答证据范围。
 - Paper Comparison 只有在 workflow input 提供 canonical `doc_id` 时才能严格隔离每篇论文的 retrieval filter；仅从自然语言识别 title 时，名称查询仍可能召回同一 corpus 中的其他文档。
-- Guarded Answer Tool 当前只接受 query 并复用冻结 Pipeline，不能直接消费 workflow 预检索的 evidence table；最终 summary 的引用以该 Tool 返回的 generation evidence 为准。
+- EvidenceBundle ID 保证 Agent 各阶段使用同一规范内容，但当前仅在进程内传递，没有签名、外部存储事务或跨服务防篡改机制。
 - Workflow state 可以序列化，但当前不支持从 workflow 内部某一步断点续跑；重试恢复会从整个 workflow 起点重新执行，依赖各 Tool cache 控制外部调用成本。
 - 独立 `audit_answer` 要求带 citation 与 generation evidence IDs 的完整 answer artifact，不能用来审计无 provenance 的任意文本。
 - Controller 的 wall-clock timeout 会在同步 Tool 返回后立即生效，但不能抢占正在执行的同步 Tool；底层 API 调用仍依赖各 Tool 自身 timeout。
@@ -453,7 +495,7 @@ Phase 6 synthetic benchmark 的 3 个 case 全部通过：task classification ac
 - Evidence Ledger 的 claim 粒度优先来自 Citation Audit；如果 audit 没有逐 claim 输出，只能把带 citations 的 workflow summary/claim 作为单条 fallback 记录。
 - Memory 写入是 fail-open 的旁路记录：持久化失败会出现在 `memory_status.errors`，但不会把已经完成的科研任务改判失败。
 - 当前没有跨任务 session、Multi-Agent、autonomous browsing、无限 reflection 或 autonomous workflow。
-- Agent Evaluation v1 主要验证 deterministic synthetic cases 和运行时结构不变量；尚未建立独立真实科研任务 hold-out Agent benchmark。Runtime evaluation 没有标注时不会提供 task/workflow accuracy。
+- Agent Benchmark v2 真实执行 Planner/Controller/Workflow/Tool 边界，但 Tool backend 仍是 deterministic double；尚未建立独立真实论文 hold-out、真实 API failure 和人工质量标注的 Agent benchmark。
 - Scholarly Discovery 只返回第三方 metadata，未实现 PDF 自动下载、license 判断、用户选择工作流或自动 corpus ingestion。
 - arXiv/OpenAlex 的 metadata 完整性、去重与来源类型取决于第三方记录；abstract 不能替代解析后 chunk evidence。
 - OpenAlex 需要单独的 `OPENALEX_API_KEY`，其额度、价格与 API 行为由第三方服务控制。
@@ -465,7 +507,7 @@ Phase 6 synthetic benchmark 的 3 个 case 全部通过：task classification ac
 - Evidence Judge 当前偏保守，44 条评测仍有 8 个 false negatives。
 - LLM 阶段依赖外部 API、模型版本和网络；缓存结果不代表重新调用时的长期稳定性。
 - 部分 YAML 配置含本机绝对路径，跨机器使用前需要调整。
-- 历史 Agent、旧 `MemoryStore`、旧 Audit 和两个无 `.gitmodules` 映射的 Git link 仍作为兼容代码保留；Phase 5 Research Memory 是独立的新主流程组件。
+- 历史 Agent、旧 `MemoryStore` 与旧 Audit 仍作为兼容代码保留；两个 orphan Git links 已从公开仓库索引移除，但对应本机迁移仓库仍保留且被忽略。
 - 当前是本地 Demo，没有认证、并发隔离、服务化 API、容器化和线上部署。
 
 ## Future Work
@@ -474,9 +516,9 @@ Phase 6 synthetic benchmark 的 3 个 case 全部通过：task classification ac
 2. 在独立 hold-out corpus 上扩充 retrieval、answerability 和 citation audit 评测。
 3. 校准 Evidence Sufficiency，降低 false negatives，同时保持 fail-closed 行为。
 4. 将本地绝对路径迁移为可移植配置，并补充数据准备 manifest。
-5. 在独立真实 Agent/workflow hold-out benchmark 上扩展 task classification、workflow trace、policy stop、论文识别、memory lineage 和失败恢复评测。
+5. 在独立真实 Agent/workflow hold-out 上运行真实 Retrieval、LLM Judge、Generation 与 Audit，扩展论文识别、恢复质量、成本和失败注入评测。
 6. 为候选论文增加显式用户选择与受控 ingestion manifest，并建立 title/DOI 到 canonical `doc_id` 的映射，但仍禁止 metadata 直接进入回答生成。
-7. 设计只接受 canonical evidence 的受控 synthesis Tool，消除 workflow 预检索与 Guarded Answer Tool 内部重检索之间的重复。
+7. 根据真实 hold-out 的失败分布校准 bounded replanning 触发条件，避免无收益的重复 retrieval，同时维持最大两次 revision。
 8. 为 JSONL memory 增加归档、retention、完整性审计和多进程安全方案，再评估是否迁移 SQLite。
 9. 评估是否需要比 keyword advisory 更严格的短期 session context；在有 benchmark 前不引入用户画像、Multi-Agent 或开放式自治循环。
 10. 增加稳定 API、并发隔离、可观测性与部署方案。

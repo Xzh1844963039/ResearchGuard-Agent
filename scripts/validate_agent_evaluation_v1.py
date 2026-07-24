@@ -53,6 +53,18 @@ def _tool_history(
             ),
             "latency_ms": float(index),
             "trace_id": f"synthetic-trace-{index}",
+            "input_summary": {"case_step": index},
+            "evidence_bundle_id": (
+                "evidence-synthetic"
+                if name
+                in {
+                    "retrieve_evidence",
+                    "assess_evidence",
+                    "generate_grounded_answer",
+                    "audit_answer",
+                }
+                else None
+            ),
         }
         for index, name in enumerate(tool_names, start=1)
     ]

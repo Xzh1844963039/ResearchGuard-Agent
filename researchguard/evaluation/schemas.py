@@ -25,6 +25,7 @@ class AgentEvaluationCase:
     forbidden_tools: tuple[str, ...] = ()
     relevant_evidence_ids: tuple[str, ...] = ()
     expected_status: str = "completed"
+    expected_plan_revisions: int | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
     version: str = "1.0.0"
     schema_version: str = EVALUATION_SCHEMA_VERSION
@@ -47,6 +48,7 @@ class AgentEvaluationCase:
             "forbidden_tools": list(self.forbidden_tools),
             "relevant_evidence_ids": list(self.relevant_evidence_ids),
             "expected_status": self.expected_status,
+            "expected_plan_revisions": self.expected_plan_revisions,
             "metadata": copy.deepcopy(dict(self.metadata)),
         }
 

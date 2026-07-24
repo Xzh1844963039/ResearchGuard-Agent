@@ -7,6 +7,7 @@ from typing import Any, Iterable, Mapping
 from researchguard.evaluation.agent_metrics import (
     efficiency_metrics,
     evidence_metrics,
+    intelligence_metrics,
     memory_metrics,
     planning_metrics,
     tool_metrics,
@@ -88,6 +89,16 @@ class AgentEvaluator:
                 tool_calls,
                 expected_tools=case.expected_tools if case else (),
                 forbidden_tools=case.forbidden_tools if case else (),
+                allow_failed_calls=bool(
+                    case
+                    and (
+                        case.expected_status == "failed"
+                        or (
+                            case.expected_plan_revisions is not None
+                            and case.expected_plan_revisions > 0
+                        )
+                    )
+                ),
             )
         )
         metrics.update(
@@ -98,6 +109,14 @@ class AgentEvaluator:
             )
         )
         metrics.update(efficiency_metrics(state))
+        metrics.update(
+            intelligence_metrics(
+                state,
+                expected_plan_revisions=(
+                    case.expected_plan_revisions if case else None
+                ),
+            )
+        )
         metrics.update(
             memory_metrics(
                 getattr(state, "memory_status", {}),
@@ -130,6 +149,9 @@ class AgentEvaluator:
                 "workflow": getattr(state, "workflow_name", None),
                 "tools": tool_names,
                 "status": getattr(state, "status", "unknown"),
+                "plan_revision_count": len(
+                    getattr(state, "plan_revisions", ())
+                ),
                 "evidence_ids": [
                     item.get("chunk_id")
                     for item in getattr(state, "evidence", ())

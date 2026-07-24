@@ -9,7 +9,13 @@ from researchguard.pipeline import DEFAULT_CONFIG_PATH, PipelineSettings, load_p
 from researchguard.retrieval.answer_generator import AnswerCitation, AnswerGenerationResult
 from researchguard.retrieval.citation_audit import CitationAuditPipeline
 from researchguard.retrieval.claim_extractor import load_citation_audit_settings
-from researchguard.tools.contracts import EvidenceRecord, ToolError, ToolResult, ToolSpec
+from researchguard.tools.contracts import (
+    EvidenceBundle,
+    EvidenceRecord,
+    ToolError,
+    ToolResult,
+    ToolSpec,
+)
 from researchguard.tools.evidence_tool import normalize_evidence
 
 
@@ -74,7 +80,7 @@ class CitationAuditTool:
             description=self.description,
             input_schema={
                 "answer": "AnswerGenerationResult or its complete serialized mapping; raw strings are rejected",
-                "evidence": "non-empty list of EvidenceRecord-compatible mappings",
+                "evidence_bundle": "EvidenceBundle used by answer generation",
                 "read_cache": "boolean",
             },
         )
@@ -97,8 +103,9 @@ class CitationAuditTool:
     def audit_answer(
         self,
         answer: AnswerGenerationResult | Mapping[str, Any],
-        evidence: Iterable[EvidenceRecord | Mapping[str, Any]],
+        evidence_bundle: EvidenceBundle | Mapping[str, Any] | None = None,
         *,
+        evidence: Iterable[EvidenceRecord | Mapping[str, Any]] | None = None,
         read_cache: bool = True,
     ) -> ToolResult:
         started = time.perf_counter()
@@ -111,16 +118,40 @@ class CitationAuditTool:
                 raise TypeError(
                     "answer must be an AnswerGenerationResult or complete serialized answer artifact."
                 )
-            records = normalize_evidence(evidence)
+            if evidence_bundle is None:
+                records = normalize_evidence(evidence or ())
+                bundle_id = None
+            elif isinstance(evidence_bundle, EvidenceBundle):
+                records = evidence_bundle.evidence_records
+                bundle_id = evidence_bundle.bundle_id
+            elif isinstance(evidence_bundle, Mapping):
+                bundle = EvidenceBundle.from_mapping(evidence_bundle)
+                records = bundle.evidence_records
+                bundle_id = bundle.bundle_id
+            else:
+                raise TypeError("evidence_bundle must be an EvidenceBundle or mapping.")
+            available = {record.chunk_id: record for record in records}
+            missing = set(answer_result.evidence_chunk_ids).difference(available)
+            if missing:
+                raise ValueError(
+                    "Answer artifact references evidence outside the supplied bundle: "
+                    + ", ".join(sorted(missing))
+                )
+            selected = tuple(
+                available[chunk_id] for chunk_id in answer_result.evidence_chunk_ids
+            )
+            if not selected:
+                raise ValueError("Answer artifact does not identify evidence to audit.")
             result = self._audit_pipeline().audit(
                 answer_result,
-                [record.to_retrieval_mapping() for record in records],
+                [record.to_retrieval_mapping() for record in selected],
                 read_cache=read_cache,
             )
             latency_ms = (time.perf_counter() - started) * 1000.0
             data = {
                 "audit": result.to_dict(),
-                "evidence_chunk_ids": [record.chunk_id for record in records],
+                "evidence_bundle_id": bundle_id,
+                "evidence_chunk_ids": [record.chunk_id for record in selected],
             }
             if result.fallback_used or not result.audit_completed:
                 error = ToolError(
