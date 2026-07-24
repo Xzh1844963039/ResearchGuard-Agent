@@ -90,6 +90,7 @@ class BoundedResearchAgentController:
                 "errors": [],
             },
         )
+        self._load_memory_context(state)
         self._start_memory(state)
         return self._finalize_memory(
             self._plan_and_execute(
@@ -110,6 +111,7 @@ class BoundedResearchAgentController:
                 task_type=task_type,
                 has_evidence=bool(state.evidence),
                 has_answer=state.answer is not None,
+                memory_context=state.memory_context,
             )
         except (PlannerError, ValueError, TypeError) as exc:
             state.set_status("failed", f"planner_error: {exc}")
@@ -126,6 +128,18 @@ class BoundedResearchAgentController:
         if state.workflow_name:
             return self.execute_workflow(state)
         return self.execute(state)
+
+    def _load_memory_context(self, state: ResearchAgentState) -> None:
+        if self.memory is None or not hasattr(self.memory, "search_context"):
+            return
+        try:
+            state.memory_context = self.memory.search_context(state.query)
+        except Exception as exc:
+            state.memory_context = {}
+            state.memory_status["errors"].append(
+                f"search_context: {type(exc).__name__}: {exc}"
+            )
+        state.touch()
 
     def resume(self, state: ResearchAgentState) -> ResearchAgentState:
         if state.status in {"completed", "rejected", "failed"}:

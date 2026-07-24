@@ -127,7 +127,9 @@ def _load_json_file(path: str | None) -> object | None:
 
 def cmd_agent_run(args: argparse.Namespace) -> None:
     from researchguard.agent import AgentPolicy, BoundedResearchAgentController
+    from researchguard.evaluation import AgentEvaluator
     from researchguard.tools import build_default_registry
+    from researchguard.tracing import TraceCollector
 
     answer_artifact = _load_json_file(args.answer_json)
     if answer_artifact is not None and not isinstance(answer_artifact, dict):
@@ -161,6 +163,12 @@ def cmd_agent_run(args: argparse.Namespace) -> None:
         evidence=evidence_value,
         workflow_input=workflow_input,
     )
+    memory_snapshot = (
+        controller.memory.show(state.run_id)
+        if controller.memory is not None
+        and (args.show_memory or args.show_trace or args.show_evaluation)
+        else None
+    )
     report = {
         "Agent Plan": state.plan,
         "Workflow Selected": state.workflow_name,
@@ -179,6 +187,21 @@ def cmd_agent_run(args: argparse.Namespace) -> None:
         "Answer": state.answer,
         "Citation": state.audit_result,
     }
+    if args.show_trace:
+        report["Agent Trace"] = TraceCollector().collect(
+            state,
+            memory_snapshot=memory_snapshot,
+        ).to_dict()
+    if args.show_memory:
+        report["Memory Context"] = state.memory_context
+        report["Memory Snapshot"] = memory_snapshot
+    if args.show_evaluation:
+        report["Agent Evaluation"] = AgentEvaluator(
+            registry.names
+        ).evaluate_runtime(
+            state,
+            memory_snapshot=memory_snapshot,
+        ).to_dict()
     rendered = json.dumps(report, ensure_ascii=False, indent=2)
     if args.output:
         output_path = Path(args.output)
@@ -304,6 +327,21 @@ def main() -> None:
     agent_parser.add_argument("--max-tool-calls", type=int, default=10)
     agent_parser.add_argument("--max-retry", type=int, default=2)
     agent_parser.add_argument("--timeout", type=float, default=120.0)
+    agent_parser.add_argument(
+        "--show-trace",
+        action="store_true",
+        help="Include the complete JSON-serializable execution trace.",
+    )
+    agent_parser.add_argument(
+        "--show-memory",
+        action="store_true",
+        help="Include advisory memory context and the persisted run snapshot.",
+    )
+    agent_parser.add_argument(
+        "--show-evaluation",
+        action="store_true",
+        help="Include runtime agent health metrics without benchmark accuracy claims.",
+    )
     agent_parser.set_defaults(func=cmd_agent_run)
 
     memory_list_parser = subparsers.add_parser(

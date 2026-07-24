@@ -352,6 +352,35 @@ class MemoryPersistenceTests(unittest.TestCase):
         self.assertEqual([item.run_id for item in audit_matches], [second.run_id])
         self.assertNotEqual(review_matches[0].run_id, audit_matches[0].run_id)
 
+    def test_search_context_returns_bounded_advisory_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            memory = ResearchMemory(temp_dir)
+            previous = ResearchAgentState(
+                query="Review CRAG hallucination mitigation",
+                workflow_name="literature_review",
+                candidate_papers=[
+                    {
+                        "paper_id": "paper-crag",
+                        "title": "Corrective Retrieval Augmented Generation",
+                        "source": "semantic_scholar",
+                    }
+                ],
+            )
+            memory.start_run(previous)
+            previous.set_status("rejected", "insufficient_evidence")
+            memory.complete_run(previous)
+
+            context = memory.search_context("CRAG hallucination", limit=3)
+
+        self.assertEqual(context["matched_run_ids"], [previous.run_id])
+        self.assertEqual(context["previous_workflows"], ["literature_review"])
+        self.assertEqual(context["previous_papers"][0]["paper_id"], "paper-crag")
+        self.assertEqual(
+            context["previous_failures"][0]["failure_type"],
+            "insufficient_evidence",
+        )
+        self.assertEqual(context["schema_version"], "researchguard.memory_context.v1")
+
 
 class ControllerMemoryTests(unittest.TestCase):
     def test_controller_persists_run_and_evidence_ledger(self) -> None:
@@ -402,6 +431,29 @@ class ControllerMemoryTests(unittest.TestCase):
             restored["failures"][0]["failure_type"],
             "insufficient_evidence",
         )
+
+    def test_controller_uses_previous_run_as_bounded_planner_advisory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            registry = tool_registry()
+            memory = ResearchMemory(temp_dir)
+            controller = BoundedResearchAgentController(
+                registry=registry,
+                workflow_registry=workflow_registry(registry),
+                memory=memory,
+            )
+            first = controller.run(
+                "Verify this claim: CRAG uses a retrieval evaluator.",
+                task_type="claim_audit",
+            )
+            second = controller.run(
+                "Verify this claim: CRAG uses a retrieval evaluator.",
+                task_type="claim_audit",
+            )
+
+        self.assertIn(first.run_id, second.memory_context["matched_run_ids"])
+        self.assertNotIn(second.run_id, second.memory_context["matched_run_ids"])
+        self.assertEqual(second.task_type, "claim_audit")
+        self.assertEqual(second.workflow_name, "claim_audit")
 
     def test_memory_failure_does_not_change_successful_agent_result(self) -> None:
         class BrokenMemory:

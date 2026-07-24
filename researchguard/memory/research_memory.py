@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -89,3 +90,77 @@ class ResearchMemory:
             since=since,
             limit=limit,
         )
+
+    def search_context(
+        self,
+        query: str,
+        *,
+        workflow: str | None = None,
+        limit: int = 5,
+    ) -> dict[str, Any]:
+        if limit < 1:
+            raise ValueError("limit must be positive.")
+        records = self.find_previous_runs(
+            query,
+            workflow=workflow,
+            limit=limit,
+        )
+        papers: list[dict[str, Any]] = []
+        seen_papers: set[str] = set()
+        failures: list[dict[str, Any]] = []
+        for record in records:
+            for paper in record.papers:
+                identity = str(
+                    paper.get("paper_id")
+                    or paper.get("doi")
+                    or paper.get("title")
+                    or ""
+                ).strip()
+                if not identity or identity in seen_papers:
+                    continue
+                seen_papers.add(identity)
+                papers.append(
+                    {
+                        "paper_id": paper.get("paper_id"),
+                        "title": paper.get("title"),
+                        "doi": paper.get("doi"),
+                        "source": paper.get("source"),
+                    }
+                )
+            for failure in self.failures.for_run(record.run_id):
+                failures.append(
+                    {
+                        "run_id": failure.run_id,
+                        "failure_type": failure.failure_type,
+                        "reason": failure.reason,
+                        "workflow_name": failure.workflow_name,
+                        "timestamp": failure.timestamp,
+                    }
+                )
+        return {
+            "schema_version": "researchguard.memory_context.v1",
+            "version": "1.0.0",
+            "query": str(query),
+            "matched_run_ids": [record.run_id for record in records],
+            "matched_runs": [
+                {
+                    "run_id": record.run_id,
+                    "query": record.query,
+                    "workflow_name": record.workflow_name,
+                    "status": record.status,
+                    "updated_at": record.updated_at,
+                    "evidence_ids": list(record.evidence_ids),
+                }
+                for record in records
+            ],
+            "previous_workflows": list(
+                dict.fromkeys(
+                    record.workflow_name
+                    for record in records
+                    if record.workflow_name
+                )
+            ),
+            "previous_papers": papers[:10],
+            "previous_failures": failures[:limit],
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }

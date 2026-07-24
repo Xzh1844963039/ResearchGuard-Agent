@@ -28,7 +28,9 @@ from demo.utils import (
     validate_pipeline_result,
 )
 from researchguard.agent import BoundedResearchAgentController
+from researchguard.evaluation import AgentEvaluator
 from researchguard.pipeline import ResearchGuardPipeline
+from researchguard.tracing import TraceCollector
 
 
 PIPELINE_CONFIG = PROJECT_ROOT / "configs" / "pipeline_v1.yaml"
@@ -133,7 +135,26 @@ def run_researchguard(query: str) -> dict[str, Any]:
 
 
 def run_research_workflow(query: str, task_type: str) -> dict[str, Any]:
-    return get_agent_controller().run(query, task_type=task_type).to_dict()
+    controller = get_agent_controller()
+    state = controller.run(query, task_type=task_type)
+    memory_snapshot = (
+        controller.memory.show(state.run_id)
+        if controller.memory is not None
+        else None
+    )
+    payload = state.to_dict()
+    payload["agent_trace"] = TraceCollector().collect(
+        state,
+        memory_snapshot=memory_snapshot,
+    ).to_dict()
+    payload["memory_snapshot"] = memory_snapshot
+    payload["evaluation"] = AgentEvaluator(
+        controller.registry.names
+    ).evaluate_runtime(
+        state,
+        memory_snapshot=memory_snapshot,
+    ).to_dict()
+    return payload
 
 
 def render_stage_status(result: dict[str, Any]) -> None:
@@ -298,6 +319,18 @@ def render_workflow_result(state: dict[str, Any]) -> None:
     columns[0].metric("Task Type", str(state.get("task_type") or "Unknown"))
     columns[1].metric("Workflow Selected", workflow_name)
 
+    st.markdown("## Agent Plan")
+    agent_trace = state.get("agent_trace") or {}
+    plan = state.get("plan") or agent_trace.get("plan") or []
+    if plan:
+        st.dataframe(
+            plan,
+            hide_index=True,
+            use_container_width=True,
+        )
+    else:
+        st.info(f"Bounded workflow selected: {workflow_name}")
+
     st.markdown("## Tool Trace")
     steps = state.get("workflow_steps") or []
     if steps:
@@ -327,6 +360,63 @@ def render_workflow_result(state: dict[str, Any]) -> None:
             metadata[1].metric("Score", score_label)
             st.write(item.get("content") or "No evidence text available.")
             st.caption(f"Chunk ID: {item.get('chunk_id') or 'Unknown'}")
+
+    st.markdown("## Evidence Ledger")
+    memory_snapshot = state.get("memory_snapshot") or {}
+    ledger = memory_snapshot.get("evidence_ledger") or []
+    if ledger:
+        for index, record in enumerate(ledger, start=1):
+            with st.expander(
+                f"Ledger claim {index} | {record.get('verification_status', 'unknown')}",
+                expanded=index == 1,
+            ):
+                st.write(record.get("claim_text") or "No claim text available.")
+                st.json(sanitize_for_display(record), expanded=1)
+    else:
+        st.info("No claim-level evidence ledger records were created for this run.")
+
+    st.markdown("## Research Memory")
+    memory_context = state.get("memory_context") or {}
+    memory_columns = st.columns(3)
+    memory_columns[0].metric(
+        "Previous Runs",
+        len(memory_context.get("matched_run_ids") or []),
+    )
+    memory_columns[1].metric(
+        "Previous Papers",
+        len(memory_context.get("previous_papers") or []),
+    )
+    memory_columns[2].metric(
+        "Previous Failures",
+        len(memory_context.get("previous_failures") or []),
+    )
+    with st.expander("Show Memory Context"):
+        st.json(sanitize_for_display(memory_context), expanded=2)
+
+    st.markdown("## Evaluation Metrics")
+    evaluation = state.get("evaluation") or {}
+    metrics = evaluation.get("metrics") or {}
+    if metrics:
+        rows = [
+            {
+                "category": metric.get("category"),
+                "metric": name,
+                "value": metric.get("value"),
+                "passed": metric.get("passed"),
+            }
+            for name, metric in metrics.items()
+        ]
+        st.dataframe(
+            rows,
+            column_order=("category", "metric", "value", "passed"),
+            hide_index=True,
+            use_container_width=True,
+        )
+        st.caption(
+            "Runtime metrics report operational health; benchmark accuracy requires labeled cases."
+        )
+    else:
+        st.info("No runtime evaluation metrics were produced.")
 
     st.markdown("## Final Result")
     workflow_result = state.get("workflow_result")

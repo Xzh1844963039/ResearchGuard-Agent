@@ -27,6 +27,7 @@ class ResearchAgentState:
     workflow_steps: list[dict[str, Any]] = field(default_factory=list)
     workflow_result: dict[str, Any] | None = None
     memory_status: dict[str, Any] = field(default_factory=dict)
+    memory_context: dict[str, Any] = field(default_factory=dict)
     current_step: int = 0
     retry_counts: dict[str, int] = field(default_factory=dict)
     tool_history: list[dict[str, Any]] = field(default_factory=list)
@@ -82,6 +83,7 @@ class ResearchAgentState:
             "workflow_steps": copy.deepcopy(self.workflow_steps),
             "workflow_result": copy.deepcopy(self.workflow_result),
             "memory_status": copy.deepcopy(self.memory_status),
+            "memory_context": copy.deepcopy(self.memory_context),
             "current_step": self.current_step,
             "retry_counts": copy.deepcopy(self.retry_counts),
             "tool_history": copy.deepcopy(self.tool_history),
@@ -114,6 +116,7 @@ class ResearchAgentState:
             workflow_steps=copy.deepcopy(list(value.get("workflow_steps", []))),
             workflow_result=copy.deepcopy(value.get("workflow_result")),
             memory_status=copy.deepcopy(dict(value.get("memory_status", {}))),
+            memory_context=copy.deepcopy(dict(value.get("memory_context", {}))),
             current_step=int(value.get("current_step", 0)),
             retry_counts={
                 str(key): int(item)

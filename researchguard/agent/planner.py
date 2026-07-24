@@ -1,10 +1,11 @@
 # C:\Users\18449\Desktop\researchguard_workspace\researchguard\agent\planner.py
 from __future__ import annotations
 
+import copy
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Mapping
 
 from researchguard.agent.state import utc_timestamp
 from researchguard.tools import ToolRegistry
@@ -76,6 +77,7 @@ class AgentPlan:
     steps: tuple[PlanStep, ...]
     created_at: str
     workflow: str | None = None
+    memory_context: Mapping[str, Any] | None = None
     schema_version: str = PLAN_SCHEMA_VERSION
 
     def to_dict(self) -> dict[str, Any]:
@@ -84,6 +86,7 @@ class AgentPlan:
             "task_type": self.task_type,
             "created_at": self.created_at,
             "workflow": self.workflow,
+            "memory_context": copy.deepcopy(dict(self.memory_context or {})),
             "steps": [step.to_dict() for step in self.steps],
         }
 
@@ -117,6 +120,7 @@ class BoundedPlanner:
         task_type: str | None = None,
         has_evidence: bool = False,
         has_answer: bool = False,
+        memory_context: Mapping[str, Any] | None = None,
     ) -> AgentPlan:
         normalized_query = " ".join(str(query).split()).strip()
         if not normalized_query:
@@ -166,7 +170,32 @@ class BoundedPlanner:
             steps=steps,
             created_at=utc_timestamp(),
             workflow=workflow,
+            memory_context=self._advisory_memory(memory_context),
         )
+
+    @staticmethod
+    def _advisory_memory(
+        memory_context: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        if not memory_context:
+            return {}
+        return {
+            "schema_version": str(memory_context.get("schema_version", "")),
+            "matched_run_ids": [
+                str(item)
+                for item in list(memory_context.get("matched_run_ids", ()))[:5]
+            ],
+            "previous_workflows": [
+                str(item)
+                for item in list(memory_context.get("previous_workflows", ()))[:5]
+            ],
+            "previous_papers": copy.deepcopy(
+                list(memory_context.get("previous_papers", ()))[:10]
+            ),
+            "previous_failures": copy.deepcopy(
+                list(memory_context.get("previous_failures", ()))[:5]
+            ),
+        }
 
     @staticmethod
     def classify_task(query: str) -> str:
