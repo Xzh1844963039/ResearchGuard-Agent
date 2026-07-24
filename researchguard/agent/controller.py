@@ -6,11 +6,25 @@ import time
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from researchguard.agent.planner import BoundedPlanner, PlannerError
+from researchguard.agent.hybrid_planner import (
+    DEFAULT_PLANNER_CONFIG,
+    DeterministicPlanner,
+    HybridPlanner,
+    PlannerOutcome,
+    load_hybrid_planner_settings,
+)
+from researchguard.agent.planner import PlannerError
+from researchguard.agent.planner_schema import (
+    PlanBudget,
+    StructuredPlan,
+    StructuredPlanStep,
+)
+from researchguard.agent.planner_validator import PlanValidationResult
 from researchguard.agent.policy import AgentPolicy
 from researchguard.agent.replanner import BoundedReplanner
 from researchguard.agent.state import ResearchAgentState, utc_timestamp
 from researchguard.memory import DEFAULT_MEMORY_ROOT, ResearchMemory
+from researchguard.skills import SkillRegistry, build_default_skill_registry
 from researchguard.tools import (
     EvidenceBundle,
     EvidenceRecord,
@@ -34,6 +48,7 @@ class BoundedResearchAgentController:
         *,
         registry: ToolRegistry | None = None,
         workflow_registry: WorkflowRegistry | None = None,
+        skill_registry: SkillRegistry | None = None,
         planner: Any | None = None,
         replanner: Any | None = None,
         policy: AgentPolicy | None = None,
@@ -41,9 +56,14 @@ class BoundedResearchAgentController:
         memory_enabled: bool = True,
         memory_root: str | Path = DEFAULT_MEMORY_ROOT,
         config_path: str | Path = "configs/pipeline_v1.yaml",
+        planner_config_path: str | Path = DEFAULT_PLANNER_CONFIG,
     ):
+        custom_registry = registry is not None
         self.policy = policy or AgentPolicy()
         self.registry = registry or build_default_registry(config_path)
+        self.skill_registry = skill_registry or build_default_skill_registry(
+            self.registry
+        )
         self.memory = memory if memory is not None else (
             ResearchMemory(memory_root) if memory_enabled else None
         )
@@ -67,11 +87,25 @@ class BoundedResearchAgentController:
             )
         else:
             self.workflow_registry = WorkflowRegistry()
-        self.planner = planner or BoundedPlanner(
-            self.registry,
-            max_steps=self.policy.max_steps,
+        deterministic = DeterministicPlanner(
+            registry=self.registry,
+            skills=self.skill_registry,
+            policy=self.policy,
             workflow_names=self.workflow_registry.names,
         )
+        if planner is not None:
+            self.planner = planner
+        elif custom_registry:
+            self.planner = deterministic
+        else:
+            self.planner = HybridPlanner(
+                registry=self.registry,
+                skills=self.skill_registry,
+                policy=self.policy,
+                deterministic=deterministic,
+                settings=load_hybrid_planner_settings(planner_config_path),
+                workflow_names=self.workflow_registry.names,
+            )
         self.replanner = replanner or BoundedReplanner(
             max_revisions=self.policy.max_plan_revisions,
         )
@@ -120,19 +154,16 @@ class BoundedResearchAgentController:
         task_type: str | None,
     ) -> ResearchAgentState:
         try:
-            plan = self.planner.create_plan(
-                state.query,
-                task_type=task_type,
-                has_evidence=bool(state.evidence),
-                has_answer=state.answer is not None,
-                memory_context=state.memory_context,
-            )
+            outcome = self._generate_plan(state, task_type=task_type)
         except (PlannerError, ValueError, TypeError) as exc:
             state.set_status("failed", f"planner_error: {exc}")
             return state
 
+        plan = outcome.executable_plan
         state.task_type = plan.task_type
         state.plan = [step.to_dict() for step in plan.steps]
+        state.planner_plan = outcome.structured_plan.copy_dict()
+        state.planner_metadata = outcome.metadata()
         state.workflow_name = plan.workflow
         state.set_status("planned")
         plan_error = self.policy.validate_plan(state)
@@ -142,6 +173,100 @@ class BoundedResearchAgentController:
         if state.workflow_name:
             return self.execute_workflow(state)
         return self.execute(state)
+
+    def _generate_plan(
+        self,
+        state: ResearchAgentState,
+        *,
+        task_type: str | None,
+    ) -> PlannerOutcome:
+        kwargs = {
+            "task_type": task_type,
+            "has_evidence": bool(state.evidence),
+            "has_answer": state.answer is not None,
+            "memory_context": state.memory_context,
+        }
+        generate = getattr(self.planner, "generate_plan", None)
+        if callable(generate):
+            outcome = generate(state.query, **kwargs)
+            if not isinstance(outcome, PlannerOutcome):
+                raise TypeError("Planner Interface must return PlannerOutcome.")
+            return outcome
+
+        create = getattr(self.planner, "create_plan", None)
+        if not callable(create):
+            raise TypeError(
+                "Planner must implement generate_plan(query) or create_plan(query)."
+            )
+        plan = create(state.query, **kwargs)
+        tool_to_skill = {
+            "retrieve_evidence": "retrieve_evidence",
+            "search_scholarly_sources": "search_scholarly_sources",
+            "assess_evidence": "assess_evidence",
+            "generate_grounded_answer": "generate_report",
+            "audit_answer": "audit_claims",
+        }
+        structured_steps: list[StructuredPlanStep] = []
+        for step in plan.steps:
+            skill = tool_to_skill.get(step.tool)
+            if skill is None:
+                raise PlannerError(
+                    f"Legacy planner references an unsupported tool: {step.tool}"
+                )
+            spec = self.skill_registry.get(skill)
+            structured_steps.append(
+                StructuredPlanStep(
+                    skill=skill,
+                    purpose=step.purpose,
+                    expected_observation=spec.output_type,
+                    max_retry=(
+                        self.policy.max_retry
+                        if step.max_retry is None
+                        else step.max_retry
+                    ),
+                )
+            )
+        if not structured_steps and plan.workflow is not None:
+            structured_steps.append(
+                StructuredPlanStep(
+                    skill="retrieve_evidence",
+                    purpose=f"Execute the registered {plan.workflow} workflow.",
+                    expected_observation="WorkflowResult",
+                    max_retry=self.policy.max_retry,
+                )
+            )
+        structured = StructuredPlan(
+            task_type=plan.task_type,
+            goal=state.query,
+            steps=tuple(structured_steps),
+            budget=PlanBudget(
+                max_steps=self.policy.max_steps,
+                max_tool_calls=self.policy.max_tool_calls,
+                max_retries=self.policy.max_retry,
+                max_plan_revisions=self.policy.max_plan_revisions,
+            ),
+            reasoning_summary=(
+                "Adapt a legacy create_plan implementation to the Planner Interface."
+            ),
+            planner_version="legacy_create_plan_adapter_v1",
+        )
+        return PlannerOutcome(
+            structured_plan=structured,
+            executable_plan=plan,
+            mode="legacy_planner_adapter",
+            fallback_used=False,
+            fallback_reason=None,
+            validation=PlanValidationResult(
+                valid=True,
+                reason=None,
+                errors=(),
+                validator_version="legacy_adapter_compatibility",
+            ),
+            planner_model=type(self.planner).__name__,
+            prompt_version="legacy_create_plan_adapter_v1",
+            latency_ms=0.0,
+            api_call_count=0,
+        )
 
     def _load_memory_context(self, state: ResearchAgentState) -> None:
         if self.memory is None or not hasattr(self.memory, "search_context"):
@@ -304,7 +429,16 @@ class BoundedResearchAgentController:
                 retry_key = str(state.current_step)
                 retry_count = state.retry_counts.get(retry_key, 0)
                 retryable = bool(result.error and result.error.retryable)
-                if retryable and self.policy.can_retry(retry_count):
+                step_retry_limit = step.get("max_retry")
+                retry_limit = (
+                    self.policy.max_retry
+                    if step_retry_limit is None
+                    else min(
+                        self.policy.max_retry,
+                        max(0, int(step_retry_limit)),
+                    )
+                )
+                if retryable and retry_count < retry_limit:
                     state.retry_counts[retry_key] = retry_count + 1
                     state.touch()
                     continue

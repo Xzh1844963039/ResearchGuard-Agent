@@ -6,6 +6,9 @@ from dataclasses import dataclass
 from researchguard.agent.state import ResearchAgentState
 
 
+MAX_PLAN_REVISIONS = 2
+
+
 @dataclass(frozen=True)
 class AgentPolicy:
     max_steps: int = 6
@@ -21,8 +24,10 @@ class AgentPolicy:
             raise ValueError("max_tool_calls must be positive.")
         if self.max_retry < 0:
             raise ValueError("max_retry must not be negative.")
-        if self.max_plan_revisions < 0:
-            raise ValueError("max_plan_revisions must not be negative.")
+        if not 0 <= self.max_plan_revisions <= MAX_PLAN_REVISIONS:
+            raise ValueError(
+                f"max_plan_revisions must be between 0 and {MAX_PLAN_REVISIONS}."
+            )
         if self.timeout <= 0:
             raise ValueError("timeout must be positive.")
 

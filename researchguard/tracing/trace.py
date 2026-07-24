@@ -17,6 +17,8 @@ class AgentTrace:
     query: str
     task_type: str
     plan: tuple[Mapping[str, Any], ...]
+    planner_plan: Mapping[str, Any] | None
+    planner_metadata: Mapping[str, Any]
     plan_revisions: tuple[Mapping[str, Any], ...]
     workflow_name: str | None
     workflow_steps: tuple[Mapping[str, Any], ...]
@@ -47,6 +49,12 @@ class AgentTrace:
             "query": self.query,
             "task_type": self.task_type,
             "plan": copy.deepcopy(list(self.plan)),
+            "planner_plan": (
+                copy.deepcopy(dict(self.planner_plan))
+                if self.planner_plan
+                else None
+            ),
+            "planner_metadata": copy.deepcopy(dict(self.planner_metadata)),
             "plan_revisions": copy.deepcopy(list(self.plan_revisions)),
             "workflow_name": self.workflow_name,
             "workflow_steps": copy.deepcopy(list(self.workflow_steps)),

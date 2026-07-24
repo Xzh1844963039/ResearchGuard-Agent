@@ -63,6 +63,7 @@ class PlanStep:
     optional: bool = False
     parameters: Mapping[str, Any] | None = None
     recovery_terminal: bool = False
+    max_retry: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -72,6 +73,7 @@ class PlanStep:
             "optional": self.optional,
             "parameters": copy.deepcopy(dict(self.parameters or {})),
             "recovery_terminal": self.recovery_terminal,
+            "max_retry": self.max_retry,
         }
 
 

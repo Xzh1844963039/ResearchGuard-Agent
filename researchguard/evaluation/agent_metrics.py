@@ -138,6 +138,13 @@ def evidence_metrics(
 def efficiency_metrics(state: Any) -> dict[str, MetricValue]:
     tool_calls = list(getattr(state, "tool_history", ()))
     retries = sum(int(value) for value in getattr(state, "retry_counts", {}).values())
+    planner_metadata = getattr(state, "planner_metadata", {})
+    planner_api_calls = (
+        int(planner_metadata.get("api_call_count", 0) or 0)
+        if isinstance(planner_metadata, Mapping)
+        else 0
+    )
+    tool_api_calls = sum(_api_calls(call) for call in tool_calls)
     return {
         "latency_ms": MetricValue(
             "latency_ms",
@@ -163,8 +170,12 @@ def efficiency_metrics(state: Any) -> dict[str, MetricValue]:
         "api_call_count": MetricValue(
             "api_call_count",
             "efficiency",
-            sum(_api_calls(call) for call in tool_calls),
+            planner_api_calls + tool_api_calls,
             None,
+            {
+                "planner_api_calls": planner_api_calls,
+                "tool_api_calls": tool_api_calls,
+            },
         ),
     }
 

@@ -18,6 +18,16 @@ class AgentTraceTests(unittest.TestCase):
             query="Compare CRAG and standard RAG.",
             task_type="paper_comparison",
             plan=[{"step_id": 1, "tool": "retrieve_evidence"}],
+            planner_plan={
+                "schema_version": "researchguard.structured_plan.v1",
+                "task_type": "paper_comparison",
+                "steps": [{"skill": "compare_evidence"}],
+            },
+            planner_metadata={
+                "mode": "hybrid_llm",
+                "fallback_used": False,
+                "api_call_count": 1,
+            },
             workflow_name="paper_comparison",
             workflow_steps=[
                 {
@@ -62,6 +72,11 @@ class AgentTraceTests(unittest.TestCase):
         payload = json.loads(trace.to_json())
 
         self.assertEqual(payload["query"], state.query)
+        self.assertEqual(
+            payload["planner_plan"]["steps"][0]["skill"],
+            "compare_evidence",
+        )
+        self.assertEqual(payload["planner_metadata"]["mode"], "hybrid_llm")
         self.assertEqual(payload["workflow_name"], "paper_comparison")
         self.assertEqual(payload["tool_calls"][0]["trace_id"], "trace-1")
         self.assertEqual(payload["evidence"][0]["chunk_id"], "paper-crag::chunk-7")

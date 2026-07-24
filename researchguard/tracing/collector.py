@@ -32,6 +32,12 @@ class TraceCollector:
             query=state.query,
             task_type=state.task_type,
             plan=tuple(plan),
+            planner_plan=copy.deepcopy(
+                getattr(state, "planner_plan", None)
+            ),
+            planner_metadata=copy.deepcopy(
+                getattr(state, "planner_metadata", {})
+            ),
             plan_revisions=tuple(
                 copy.deepcopy(getattr(state, "plan_revisions", ()))
             ),
@@ -62,7 +68,11 @@ class TraceCollector:
             },
             {
                 "stage": "plan",
-                "status": "selected",
+                "status": str(
+                    getattr(state, "planner_metadata", {}).get(
+                        "mode", "selected"
+                    )
+                ),
                 "timestamp": state.created_at,
                 "summary": state.workflow_name or state.task_type,
             },

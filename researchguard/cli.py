@@ -128,7 +128,6 @@ def _load_json_file(path: str | None) -> object | None:
 def cmd_agent_run(args: argparse.Namespace) -> None:
     from researchguard.agent import AgentPolicy, BoundedResearchAgentController
     from researchguard.evaluation import AgentEvaluator
-    from researchguard.tools import build_default_registry
     from researchguard.tracing import TraceCollector
 
     answer_artifact = _load_json_file(args.answer_json)
@@ -151,12 +150,12 @@ def cmd_agent_run(args: argparse.Namespace) -> None:
         max_plan_revisions=args.max_plan_revisions,
         timeout=args.timeout,
     )
-    registry = build_default_registry(args.config)
     controller = BoundedResearchAgentController(
-        registry=registry,
         policy=policy,
         config_path=args.config,
+        planner_config_path=args.planner_config,
     )
+    registry = controller.registry
     state = controller.run(
         args.query,
         task_type=args.task_type,
@@ -303,12 +302,17 @@ def main() -> None:
             "paper_comparison",
             "claim_audit",
         ),
-        help="Optional task type override; otherwise inferred deterministically.",
+        help="Optional task type override; otherwise inferred by the configured planner.",
     )
     agent_parser.add_argument(
         "--config",
         default=DEFAULT_PIPELINE_CONFIG,
         help="Pipeline YAML config used by the registered tools.",
+    )
+    agent_parser.add_argument(
+        "--planner-config",
+        default="configs/planner_v2.yaml",
+        help="Hybrid Planner YAML config path.",
     )
     agent_parser.add_argument(
         "--answer-json",

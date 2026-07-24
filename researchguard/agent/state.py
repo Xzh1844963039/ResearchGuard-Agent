@@ -22,6 +22,8 @@ class ResearchAgentState:
     query: str
     task_type: str = "unknown"
     plan: list[dict[str, Any]] = field(default_factory=list)
+    planner_plan: dict[str, Any] | None = None
+    planner_metadata: dict[str, Any] = field(default_factory=dict)
     workflow_name: str | None = None
     workflow_input: dict[str, Any] = field(default_factory=dict)
     workflow_steps: list[dict[str, Any]] = field(default_factory=list)
@@ -82,6 +84,8 @@ class ResearchAgentState:
             "query": self.query,
             "task_type": self.task_type,
             "plan": copy.deepcopy(self.plan),
+            "planner_plan": copy.deepcopy(self.planner_plan),
+            "planner_metadata": copy.deepcopy(self.planner_metadata),
             "workflow_name": self.workflow_name,
             "workflow_input": copy.deepcopy(self.workflow_input),
             "workflow_steps": copy.deepcopy(self.workflow_steps),
@@ -115,6 +119,10 @@ class ResearchAgentState:
             query=str(value.get("query", "")),
             task_type=str(value.get("task_type", "unknown")),
             plan=copy.deepcopy(list(value.get("plan", []))),
+            planner_plan=copy.deepcopy(value.get("planner_plan")),
+            planner_metadata=copy.deepcopy(
+                dict(value.get("planner_metadata", {}))
+            ),
             workflow_name=(
                 str(value["workflow_name"])
                 if value.get("workflow_name") is not None

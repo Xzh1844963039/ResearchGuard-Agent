@@ -47,6 +47,8 @@ class AgentPolicyTests(unittest.TestCase):
             AgentPolicy(max_plan_revisions=-1)
         with self.assertRaises(ValueError):
             AgentPolicy(timeout=0)
+        with self.assertRaises(ValueError):
+            AgentPolicy(max_plan_revisions=3)
 
 
 if __name__ == "__main__":

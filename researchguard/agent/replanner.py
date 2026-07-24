@@ -137,6 +137,7 @@ class BoundedReplanner:
                     "read_cache": False,
                 },
                 "recovery_terminal": False,
+                "max_retry": 1,
             },
             {
                 "tool": "assess_evidence",
@@ -144,6 +145,7 @@ class BoundedReplanner:
                 "optional": False,
                 "parameters": {},
                 "recovery_terminal": False,
+                "max_retry": 1,
             },
             {
                 "tool": "generate_grounded_answer",
@@ -151,6 +153,7 @@ class BoundedReplanner:
                 "optional": False,
                 "parameters": {},
                 "recovery_terminal": False,
+                "max_retry": 0,
             },
             {
                 "tool": "audit_answer",
@@ -158,6 +161,7 @@ class BoundedReplanner:
                 "optional": False,
                 "parameters": {},
                 "recovery_terminal": False,
+                "max_retry": 1,
             },
         ]
         return self._revision(state, observation, recovery_steps, reason)
@@ -179,6 +183,7 @@ class BoundedReplanner:
                 "optional": False,
                 "parameters": {"limit": 5},
                 "recovery_terminal": True,
+                "max_retry": 1,
             }
         ]
         return self._revision(state, observation, recovery_steps, reason)
@@ -218,6 +223,7 @@ class BoundedReplanner:
             if isinstance(assessment, Mapping)
             else None
         )
+        error = result.error.to_dict() if result.error else None
         return {
             "tool_name": tool_name,
             "status": result.status,
@@ -228,6 +234,9 @@ class BoundedReplanner:
                 isinstance(coverage, (int, float)) and float(coverage) < 0.25
             ),
             "support_level": support_level,
-            "error": result.error.to_dict() if result.error else None,
+            "error_type": result.error.category if result.error else None,
+            "error_code": result.error.code if result.error else None,
+            "retryable": result.error.retryable if result.error else False,
+            "error": error,
             "trace_id": result.trace_id,
         }

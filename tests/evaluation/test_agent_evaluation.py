@@ -203,13 +203,28 @@ class AgentEvaluationTests(unittest.TestCase):
             self.assertTrue(markdown_path.exists())
 
     def test_runtime_evaluation_marks_accuracy_as_unavailable(self) -> None:
-        state = ResearchAgentState(query="Runtime query", status="completed")
+        state = ResearchAgentState(
+            query="Runtime query",
+            planner_metadata={"api_call_count": 1},
+            tool_history=[
+                {
+                    "tool_name": "retrieve_evidence",
+                    "data": {"api_call_count": 2},
+                }
+            ],
+            status="completed",
+        )
 
         result = self.evaluator.evaluate_runtime(state)
 
         self.assertIsNone(result.metrics["task_classification_accuracy"].value)
         self.assertIsNone(result.metrics["workflow_selection_accuracy"].passed)
         self.assertIsNone(result.metrics["unsupported_claim_rate"].value)
+        self.assertEqual(result.metrics["api_call_count"].value, 3)
+        self.assertEqual(
+            result.metrics["api_call_count"].details["planner_api_calls"],
+            1,
+        )
 
 
 if __name__ == "__main__":
