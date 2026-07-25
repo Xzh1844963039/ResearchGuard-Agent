@@ -1,6 +1,6 @@
 index:
-  output_dir: "C:\\Users\\18449\\Desktop\\researchguard_workspace\\data\\indexes\\index_v1"
-  indexing_config_path: "C:\\Users\\18449\\Desktop\\researchguard_workspace\\configs\\indexing_v1.yaml"
+  output_dir: "data/indexes/index_v1"
+  indexing_config_path: "configs/indexing_v1.yaml"
 
 retrieval:
   default_mode: "hybrid"
@@ -11,7 +11,7 @@ retrieval:
 
 dense:
   backend: "chroma"
-  chroma_config_path: "C:\\Users\\18449\\Desktop\\researchguard_workspace\\configs\\chroma_v1.yaml"
+  chroma_config_path: "configs/chroma_v1.yaml"
 
 hybrid:
   fusion: "rrf"
@@ -23,13 +23,13 @@ filters:
   exclude_references_by_default: false
 
 reranker:
-  config_path: "C:\\Users\\18449\\Desktop\\researchguard_workspace\\configs\\reranker_v1.yaml"
+  config_path: "configs/reranker_v1.yaml"
 
 query_rewrite:
-  config_path: "C:\\Users\\18449\\Desktop\\researchguard_workspace\\configs\\query_rewrite_v1.yaml"
+  config_path: "configs/query_rewrite_v1.yaml"
 
 validation:
-  benchmark_path: "C:\\Users\\18449\\Desktop\\researchguard_workspace\\data\\eval\\retrieval_v1_queries.jsonl"
-  output_dir: "C:\\Users\\18449\\Desktop\\researchguard_workspace\\outputs\\retrieval_validation_v1"
+  benchmark_path: "data/eval/retrieval_v1_queries.jsonl"
+  output_dir: "outputs/retrieval_validation_v1"
   top_k_values: [1, 3, 5, 10]
   candidate_k: 80

@@ -10,7 +10,7 @@ from statistics import median
 from typing import Any
 
 
-PROJECT_ROOT = Path(r"C:\Users\18449\Desktop\researchguard_workspace")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 INPUT_ROOT = PROJECT_ROOT / "data" / "parsed" / "parser_eval_v5"
 OUTPUT_ROOT = PROJECT_ROOT / "outputs" / "parser_validation_v5"
 

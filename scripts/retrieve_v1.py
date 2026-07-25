@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-PROJECT_ROOT = Path(r"C:\Users\18449\Desktop\researchguard_workspace")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -23,15 +23,15 @@ from researchguard.retrieval.claim_extractor import load_citation_audit_settings
 from researchguard.retrieval.evidence_judge import load_evidence_judge_settings
 
 
-DEFAULT_CONFIG = Path(r"C:\Users\18449\Desktop\researchguard_workspace\configs\retrieval_v1.yaml")
-DEFAULT_EVIDENCE_CONFIG = Path(
-    r"C:\Users\18449\Desktop\researchguard_workspace\configs\evidence_sufficiency_v1.yaml"
+DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "retrieval_v1.yaml"
+DEFAULT_EVIDENCE_CONFIG = (
+    PROJECT_ROOT / "configs" / "evidence_sufficiency_v1.yaml"
 )
-DEFAULT_ANSWER_CONFIG = Path(
-    r"C:\Users\18449\Desktop\researchguard_workspace\configs\answer_generation_v1.yaml"
+DEFAULT_ANSWER_CONFIG = (
+    PROJECT_ROOT / "configs" / "answer_generation_v1.yaml"
 )
-DEFAULT_CITATION_AUDIT_CONFIG = Path(
-    r"C:\Users\18449\Desktop\researchguard_workspace\configs\citation_audit_v1.yaml"
+DEFAULT_CITATION_AUDIT_CONFIG = (
+    PROJECT_ROOT / "configs" / "citation_audit_v1.yaml"
 )
 
 

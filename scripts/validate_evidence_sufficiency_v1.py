@@ -13,7 +13,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-PROJECT_ROOT = Path(r"C:\Users\18449\Desktop\researchguard_workspace")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -33,7 +33,7 @@ from researchguard.retrieval.evidence_judge import (  # noqa: E402
 from researchguard.retrieval.evidence_pipeline import EvidenceSufficiencyPipeline  # noqa: E402
 
 
-DEFAULT_CONFIG = Path(r"C:\Users\18449\Desktop\researchguard_workspace\configs\evidence_sufficiency_v1.yaml")
+DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "evidence_sufficiency_v1.yaml"
 HARD_CHECK_KEYS = (
     "json_parse_failure",
     "empty_result",

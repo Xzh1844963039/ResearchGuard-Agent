@@ -4,7 +4,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-ROOT = Path(r"C:\Users\18449\Desktop\researchguard_workspace")
+ROOT = Path(__file__).resolve().parents[1]
 
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -18,7 +18,6 @@ from researchguard.memory.memory_store import MemoryStore
 from researchguard.reporting.audit_report import render_audit_markdown
 
 
-ROOT = Path(r"C:\Users\18449\Desktop\researchguard_workspace")
 OUTPUT_DIR = ROOT / "outputs" / "functional_validation"
 MEMORY_DIR = OUTPUT_DIR / "memory"
 

@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(r"C:\Users\18449\Desktop\researchguard_workspace")
+ROOT = Path(__file__).resolve().parents[1]
 
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))

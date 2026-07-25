@@ -1,12 +1,30 @@
-# ResearchGuard
+# ResearchGuard-Agent
 
-**Evidence-grounded RAG and citation auditing for scientific papers**
+**Evidence-Grounded Adaptive Research Agent for Scientific Papers**
 
 ## Overview
+
+ResearchGuard-Agent 是一个面向科研论文的 bounded、adaptive、
+evidence-grounded research agent。它以已经验收的多文档 Evidence Engine
+为底座，在其上增加受 schema 和预算约束的 Hybrid Planner、动态 Skill
+Composition、单 Agent Controller、Research Memory、Evidence Ledger 与
+完整 Trace。系统目标是完成可复核的科研检索、比较和 claim audit，而不是把
+开放式生成包装成普通 PDF 问答。
+
+当前系统不是 fully autonomous research agent，也不宣称 AGI。LLM Planner
+只能提出有限的结构化计划；确定性 Validator、Controller policy、Evidence
+Gate 和 Citation Audit 保留最终执行与发布控制。系统没有 Multi-Agent、
+无限 ReAct、运行时代码生成或不受约束的 autonomous browsing。
 
 ResearchGuard 是一个面向科研论文的多文档 RAG 工程。它不止返回与问题相似的段落，而是把版面解析、section-aware chunking、混合检索、Cross-Encoder 精排、查询改写、证据充分性判断、受证据约束的回答生成和逐 claim 引用核验串成一条可审计流程。
 
 当前 Evidence Engine 主流程已经完成本地集成与验证；v2 在其上增加了 Tool Facade、受约束的单 Agent Controller、Scholarly Discovery、Research Workflow Skills、Research Memory 与 Evidence Ledger、Agent Trace、Agent Evaluation、Agent Intelligence Upgrade v1、Hybrid Planner，以及 **Dynamic Skill Composition Upgrade v1**。最新 Agent 路径使用单一 Evidence Artifact，允许 LLM 提议严格结构化的 skill plan，并由确定性 Policy Validator、Skill Executor 与执行预算共同控制；Planner 不可用或计划非法时自动回退到原确定性 Planner。历史 Agent 和早期 Audit 代码仍保留用于兼容；历史 `MemoryStore` 也继续服务迁移代码，但不承担当前 Controller 的科研过程记忆。
+
+最终工程验证状态不是“所有质量指标均已通过”：Evidence Pipeline 回归、API
+smoke test、编译和 `120/120` 单元测试通过；独立 holdout v1 为
+`PASS_WITH_LIMITATIONS`；Agent Benchmark v3 为 `FAIL`；Planner A/B 为
+`INCONCLUSIVE_FALLBACK_ONLY`。这些结论来自 2026-07-25 的完整运行结果，
+README 不以 synthetic PASS 替代真实 Agent 任务上的失败。
 
 ## Architecture
 
@@ -71,7 +89,7 @@ flowchart TD
     SkillExecutor --> Trace["Agent Trace"]
     Controller --> Trace
     Trace --> Evaluation["Agent Evaluation"]
-    Trace --> Demo["CLI / Streamlit Demo v2"]
+    Trace --> Demo["CLI / Streamlit Demo v3 / FastAPI"]
 ```
 
 当前新增的统一契约位于 `researchguard/tools/contracts.py`：
@@ -313,6 +331,19 @@ Agent Evaluation 现在覆盖六类指标：
 
 ## Project Structure
 
+本阶段新增或升级的公开工程入口：
+
+```text
+api/                         FastAPI application; /health and /research
+demo/                        Streamlit Demo v3 and display sanitization
+researchguard/evaluation/    Agent Benchmark v3, Planner A/B, holdout metrics
+data/eval/agent_benchmark_v3 50 labeled Agent tasks without reference answers
+data/eval/holdout/           10-paper manifest and 25 blind questions
+scripts/                     benchmark, holdout, API and regression CLIs
+configs/                     portable development and isolated holdout configs
+Makefile                     install, test, demo, api and evaluation commands
+```
+
 ```text
 researchguard/
   ingestion/       PDF layout、block、heading、section 与 chunking
@@ -366,7 +397,7 @@ python -m pip install -e .
 $env:OPENAI_API_KEY = "your-key"
 ```
 
-PDF、解析结果、索引、缓存和验证输出不会随仓库发布。运行完整 Pipeline 前，需要准备本地 corpus，并按 `configs/` 中路径构建 parser/chunk/index/Chroma 资产。当前部分配置保留开发机绝对路径，迁移环境时应先调整为目标工作区路径。
+PDF、解析结果、索引、缓存和验证输出不会随仓库发布。运行完整 Pipeline 前，需要准备本地 corpus，并按 `configs/` 中路径构建 parser/chunk/index/Chroma 资产。运行时配置使用项目相对路径，可从仓库根目录直接执行；Python 文件首行的绝对路径注释仅用于遵守本项目文档规则。
 
 ## Quick Start
 
@@ -447,10 +478,10 @@ python -m researchguard.cli memory-search `
 启动 Demo：
 
 ```powershell
-streamlit run demo/app.py
+python -m streamlit run demo/app.py
 ```
 
-Demo v2 的 Evidence Pipeline 模式展示 Retrieval evidence、Evidence Sufficiency、Grounded Answer、Citation Audit，以及各阶段 latency、model、config version 和 status。Research Workflow 模式可选择 Literature Review、Paper Comparison 或 Claim Audit，并展示 Agent Plan、workflow、Tool Trace、canonical evidence、Evidence Ledger、Memory Context、Evaluation Metrics 和结构化最终结果。异常会转换为页面错误信息，API key、环境变量与内部路径不会展示。
+Demo v3 的 Research Agent 模式支持 Auto Plan、Literature Review、Paper Comparison 和 Claim Audit，并分别展示 Generated Plan、Skill Timeline、Tool Calls、Evidence Bundle、Grounded Answer、Citation Audit、Evidence Ledger、Memory Trace 与 Evaluation Metrics。Evidence Pipeline 模式继续展示 Retrieval evidence、Evidence Sufficiency、Grounded Answer、Citation Audit，以及各阶段 latency、model、config version 和 status。异常会转换为页面错误信息，API key、环境变量与内部路径不会展示。
 
 运行 Agent Evaluation v1 synthetic benchmark：
 
@@ -468,7 +499,90 @@ python scripts/validate_agent_benchmark_v2.py
 
 Benchmark v2 从 `data/eval/agent_benchmark_v2/cases.jsonl` 读取 30 条标注，真实执行 Planner、Controller、Workflow Registry 和 Tool Registry。它使用 deterministic Tool doubles，不调用外部 LLM，因此用于验证 routing、replanning、safety boundary 和数据流不变量，而不是衡量真实回答质量。报告写入 `outputs/agent_benchmark_v2/agent_benchmark_v2_report.json` 与 `agent_benchmark_v2_report.md`。
 
+## API and Demo
+
+Streamlit Demo v3 默认进入 Research Agent 模式，可选择 Auto Plan、
+Literature Review、Paper Comparison 或 Claim Audit。页面分别显示 Generated
+Plan、Skill Execution Timeline、Tool Calls、Evidence Bundle、Grounded Answer、
+Citation Audit、Evidence Ledger、Memory Trace 与 runtime evaluation。Evidence
+Pipeline 模式继续保留，便于单独查看六阶段 Evidence Engine。
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+python -m streamlit run demo/app.py
+```
+
+FastAPI 只包装 `BoundedResearchAgentController.run()`，不复制 Planner、
+Skill Executor 或 Evidence Engine 逻辑：
+
+```powershell
+python -m uvicorn api.app:app --host 127.0.0.1 --port 8000
+```
+
+```http
+GET /health
+
+POST /research
+Content-Type: application/json
+
+{
+  "query": "Compare RAPTOR and GraphRAG.",
+  "workflow": "paper_comparison",
+  "workflow_input": {}
+}
+```
+
+`workflow` 可省略以使用 Hybrid Planner，也可显式选择
+`literature_review`、`paper_comparison` 或 `claim_audit`。响应包含 plan、
+planner metadata、skill timeline、Tool calls、EvidenceBundle、canonical
+evidence、answer、audit、memory 和 plan revisions，不返回 API key 或环境变量。
+
+项目根目录提供统一命令：
+
+```powershell
+make install
+make test
+make demo
+make api
+```
+
+Windows 未安装 `make` 时，可直接执行对应的 `.venv` Python 命令。所有运行时
+YAML 路径已改为项目相对路径；新机器 clone 后仍需自行准备 `.env`、PDF、解析
+数据与 indexes，这些内容不会进入 Git。
+
 ## Data Preparation
+
+### Independent Holdout Corpus
+
+`data/eval/holdout/manifest.jsonl` 固定 10 篇与五篇开发语料完全分离的公开
+arXiv 论文，`blind_questions.jsonl` 固定 25 条盲测问题。问题只标注
+expected task type、skill pattern 和 document-level target，不包含答案、
+relevant chunk ID 或人工生成结论。PDF、parser 输出、embedding、Chroma
+collection 与评测报告均写入被 Git 忽略的目录。
+
+```powershell
+python scripts/prepare_holdout_v1.py --download --parse
+python scripts/build_index_v1.py --config configs/holdout_indexing_v1.yaml
+python scripts/build_chroma_v1.py --config configs/holdout_chroma_v1.yaml
+python scripts/validate_holdout_v1.py
+```
+
+Holdout 使用独立的 `holdout_indexing_v1.yaml`、
+`holdout_chroma_v1.yaml`、`holdout_retrieval_v1.yaml` 和
+`holdout_pipeline_v1.yaml`，不会把开发集 index 或 retrieval 标注混入结果。
+
+2026-07-25 完整 holdout 运行结果为 `PASS_WITH_LIMITATIONS`：10 篇论文解析为
+637 个 chunks，25 条 blind questions 全部执行完成。document
+coverage@10 与 document hit@10 均为 `1.0000`，provenance validity 为
+`1.0000`，gate bypass 为 `0`；但整体 pass rate 只有 `0.4800`，
+answer/refusal correctness 与 completion rate 均为 `0.6800`，task
+classification accuracy 为 `0.9200`，skill sequence accuracy 为
+`0.6800`，unsupported claim rate 为 `0.0286`。主要失败来自自然语言触发的
+comparison 误路由、无收益的额外 retrieval/replan、comparison 达到 step
+上限、claim extraction schema failure，以及生成或审计阶段的 API/grounding
+拒绝。完整报告位于
+`outputs/holdout_validation_v1/holdout_evaluation_report.md`，该目录不纳入
+Git。
 
 单篇 PDF parser 入口：
 
@@ -497,6 +611,44 @@ python scripts/retrieve_v1.py `
 
 ## Evaluation
 
+### Agent Benchmark v3 and Planner A/B
+
+Agent Benchmark v3 位于 `data/eval/agent_benchmark_v3/cases.jsonl`，包含
+50 条真实 Agent 任务：20 条 literature research、15 条 paper comparison
+和 15 条 claim audit。每条任务从 query 开始真实运行
+`Planner -> Controller -> Skill Executor -> Evidence Engine`，不直接构造最终
+state。评测覆盖 task routing、skill sequence、plan validity、完成率、无效
+skill 调用、canonical provenance、evidence coverage、unsupported claims、
+latency、Tool/API call、token cost、gate bypass 与 refusal correctness。
+
+```powershell
+python scripts/validate_agent_benchmark_v3.py
+python scripts/compare_planners_v1.py
+```
+
+Planner A/B 对同一组标注分别运行 Deterministic Planner 与 Hybrid LLM
+Planner，输出 `outputs/planner_comparison_v1/planner_comparison_report.md`。
+只有 Hybrid 非 fallback 运行产生可度量的 routing 或 skill-plan 改善时，报告
+才会判定 `HYBRID_BETTER`；全部 fallback 时明确标记为
+`INCONCLUSIVE_FALLBACK_ONLY`。
+
+2026-07-25 的完整 Agent Benchmark v3 结论为 `FAIL`。50 条任务总通过率为
+`0.6000`：literature research `0.9500`、paper comparison `0.2667`、
+claim audit `0.4667`。task classification、skill selection、plan validity
+与 provenance validity 均为 `1.0000`，evidence coverage 为 `0.9800`，
+unsupported claim rate 为 `0.0000`；但 successful completion 只有
+`0.3400`、refusal correctness 为 `0.6400`，并记录 6 次 gate-bypass
+hard check，因此不能冻结为通过版本。这里的 gate-bypass 是 benchmark 对失败
+执行路径的硬性判定，不能由其余 provenance 或 planning 指标抵消。
+
+同一批 50 条任务的 Planner A/B 结论为
+`INCONCLUSIVE_FALLBACK_ONLY`。Deterministic 与 Hybrid 的 routing、
+skill sequence、plan completeness 和 plan validity 均为 `1.0000`，但
+Hybrid 50/50 次全部 fallback，产生 50 次 API 调用、71,589 input tokens、
+13,380 output tokens，平均规划 latency 为 `3890.8216 ms`，相比
+Deterministic 的 `0.1781 ms` 没有可证明的质量提升。因此当前结果只能证明
+fallback 路径稳定，不能证明 LLM Planner 优于确定性规划。
+
 以下数字来自仓库开发阶段的固定 benchmark 与五篇论文语料，不是独立 blind hold-out，也不能外推为生产质量。
 
 | Stage | Benchmark result | Interpretation |
@@ -519,7 +671,14 @@ Phase 6 synthetic benchmark 的 3 个 case 全部通过：task classification ac
 
 Agent Benchmark v2 的 30 个 integration cases 全部通过：task/workflow accuracy `1.0000`、plan revision accuracy `1.0000`、invalid Tool rate `0.0000`、duplicate Tool call rate `0.0000`、provenance validity `1.0000`、evidence reuse rate `1.0000`。12/30 case 发生重规划，平均 `0.4667` 次 revision；需要恢复的 case 中 `successful_recovery_rate=0.6667`，其余恢复路径按设计安全拒绝。Benchmark 包含 10 个 task routing、10 个 replanning 和 10 个 safety boundary case。
 
-Phase 8 Round 1 的 planner_v2 定向测试覆盖合法 strict JSON 与序列化、非法 JSON、Planner API 异常、未知 skill、超预算、Evidence Gate 绕过、审计后再次生成、Controller Planner Interface、deterministic fallback 与结构化 PlanRevision。Round 2 在 `tests/skills/` 增加 9 个测试，覆盖 Registry、SkillResult JSON、真实 skill execution、未知 skill、budget/cycle 拒绝、gate bypass、动态 Controller 路径与 skill-level replanning。当前全量 unittest 为 `105/105 PASS`。
+Phase 8 Round 1 的 planner_v2 定向测试覆盖合法 strict JSON 与序列化、非法 JSON、Planner API 异常、未知 skill、超预算、Evidence Gate 绕过、审计后再次生成、Controller Planner Interface、deterministic fallback 与结构化 PlanRevision。Round 2 在 `tests/skills/` 增加 9 个测试，覆盖 Registry、SkillResult JSON、真实 skill execution、未知 skill、budget/cycle 拒绝、gate bypass、动态 Controller 路径与 skill-level replanning。Final Enhancement 又增加 Benchmark v3、Planner A/B、holdout、API 与 Demo v3 测试；当前全量 unittest 为 `120/120 PASS`。
+
+最终回归还通过 `python -m compileall researchguard api scripts`、
+`scripts/validate_pipeline_v1.py` 和 `scripts/validate_api_v1.py`。Pipeline
+验证的 6 个 synthetic invariants 与 8 项 hard checks 全部通过，strong case
+完成回答和 citation audit，partial/unsupported case 在 Evidence Gate 后
+拒绝；API 的 health、Controller route 与 input validation hard checks 均为
+0。单元测试与 smoke test 通过不改变上面的 Benchmark v3 `FAIL` 结论。
 
 Round 2 回归同时通过 `validate_pipeline_v1.py`、`validate_retrieval_v1.py`、`validate_agent_evaluation_v1.py` 与 `validate_agent_benchmark_v2.py`。Agent Benchmark v2 仍为 30/30 PASS，task/workflow accuracy、plan revision accuracy、provenance validity 与 evidence reuse rate 均为 `1.0000`，duplicate Tool call rate 为 `0.0000`；这证明组合层没有破坏现有边界，不代表 LLM 对开放科研任务的规划质量。
 
@@ -538,7 +697,20 @@ Round 2 回归同时通过 `validate_pipeline_v1.py`、`validate_retrieval_v1.py
 
 ## Limitations
 
-- Hybrid Planner 只负责一次受 schema 约束的 task understanding 与 plan proposal；当前没有多轮 LLM reflection。它的真实规划质量尚未在独立人工标注 hold-out 上评测，API 不可用时会退回确定性规则。
+- Agent Benchmark v3 与 holdout 提高了真实执行覆盖，但 document-level labels
+  仍不能替代逐 claim 专家标注；报告会保留 miss、拒绝和 parser warning，不为
+  追求 PASS 修改 benchmark。
+- Agent Benchmark v3 当前为 `FAIL`：paper comparison 和 claim audit 的通过率
+  分别只有 `0.2667` 与 `0.4667`，并有 6 次 gate-bypass hard check。当前版本
+  适合展示边界受控的工程架构与失败分析，不应宣称真实 Agent 质量已经验收通过。
+- Holdout v1 虽然 document hit/coverage@10 与 provenance validity 均为
+  `1.0000`，但端到端 pass rate 只有 `0.4800`；任务路由、skill sequence、
+  bounded replanning、claim extraction 与外部 API 稳定性仍是主要短板。
+- FastAPI v1 是单进程本地服务包装，没有认证、租户隔离、队列、rate limit、
+  分布式 tracing 或生产部署保证；同步 Evidence Engine 调用由线程池承载，底层
+  Tool timeout 仍是主要边界。
+
+- Hybrid Planner 只负责一次受 schema 约束的 task understanding 与 plan proposal；当前没有多轮 LLM reflection。Planner A/B 的 50 次 Hybrid 运行全部回退到确定性规则，因此尚无有效的非 fallback 质量证据；任务路由和 skill sequence 标签也不等同于专家对 reasoning quality 的人工评审。
 - Dynamic Skill Composition 当前只支持经过 Registry 和 Validator 认可的线性 skill sequence；不支持任意 DAG、并行执行、运行时定义新 skill 或动态代码生成。
 - `analyze_claims` 当前是确定性的轻量 claim candidate 提取，用于提供可追踪中间产物，不等同于独立的语义 claim verification 模型。
 - `generate_report` 会在一个受保护 skill 内顺序执行 gate、generation 与 audit；当前没有事务式回滚，底层同步 API 仍依赖各 Tool 自身 timeout。
@@ -555,34 +727,34 @@ Round 2 回归同时通过 `validate_pipeline_v1.py`、`validate_retrieval_v1.py
 - Evidence Ledger 的 claim 粒度优先来自 Citation Audit；如果 audit 没有逐 claim 输出，只能把带 citations 的 workflow summary/claim 作为单条 fallback 记录。
 - Memory 写入是 fail-open 的旁路记录：持久化失败会出现在 `memory_status.errors`，但不会把已经完成的科研任务改判失败。
 - 当前没有跨任务 session、Multi-Agent、autonomous browsing、无限 reflection 或 autonomous workflow。
-- Agent Benchmark v2 真实执行 Planner/Controller/Workflow/Tool 边界，但 Tool backend 仍是 deterministic double；尚未建立独立真实论文 hold-out、真实 API failure 和人工质量标注的 Agent benchmark。
+- Agent Benchmark v2 仍主要验证 deterministic Tool doubles；Benchmark v3 改为真实 Evidence Engine，holdout v1 改用独立 10 篇论文，但两者仍缺少逐 claim 专家参考答案与系统化 API failure injection。
 - Scholarly Discovery 只返回第三方 metadata，未实现 PDF 自动下载、license 判断、用户选择工作流或自动 corpus ingestion。
 - arXiv/OpenAlex 的 metadata 完整性、去重与来源类型取决于第三方记录；abstract 不能替代解析后 chunk evidence。
 - OpenAlex 需要单独的 `OPENALEX_API_KEY`，其额度、价格与 API 行为由第三方服务控制。
 
 - OCR fallback 尚未接入当前 Parser 主流程；扫描件质量依赖原始 PDF 文本层。
 - 复杂跨栏表格和视觉结构仍有限；caption/table/equation 主要按同 section、同页、y 距离和文档顺序绑定，不是完整视觉语义理解。
-- 当前语料只有五篇开发论文，benchmark 规模较小且不是 blind hold-out。
+- 主开发语料仍只有五篇论文；新增 10 篇独立 holdout 和 25 条 blind questions 用于隔离评测，但规模仍不足以外推到开放领域科研质量。
 - Retrieval 会为 no-answer query 返回最近邻；Evidence Gate 只判断传入 Top-k，不能证明整个 corpus 中不存在答案。
 - Evidence Judge 当前偏保守，44 条评测仍有 8 个 false negatives。
 - LLM 阶段依赖外部 API、模型版本和网络；缓存结果不代表重新调用时的长期稳定性。
-- 部分 YAML 配置含本机绝对路径，跨机器使用前需要调整。
+- 运行时 YAML 与脚本入口已迁移为项目相对路径；Python 首行保留的绝对路径仅是本项目开发文档规则，不参与路径解析。
 - 历史 Agent、旧 `MemoryStore` 与旧 Audit 仍作为兼容代码保留；两个 orphan Git links 已从公开仓库索引移除，但对应本机迁移仓库仍保留且被忽略。
-- 当前是本地 Demo，没有认证、并发隔离、服务化 API、容器化和线上部署。
+- 当前提供本地 Streamlit Demo v3 与 FastAPI v1，但没有认证、并发隔离、容器化、持久任务队列或线上部署方案。
 
 ## Future Work
 
 1. 增加 OCR fallback、复杂表格结构恢复与视觉语义绑定。
-2. 在独立 hold-out corpus 上扩充 retrieval、answerability 和 citation audit 评测。
+2. 扩大独立 holdout corpus，并增加人工逐 claim answerability 与 citation entailment 标注。
 3. 校准 Evidence Sufficiency，降低 false negatives，同时保持 fail-closed 行为。
-4. 将本地绝对路径迁移为可移植配置，并补充数据准备 manifest。
-5. 在独立真实 Agent/skill hold-out 上运行 Hybrid Planner、真实 Retrieval、LLM Judge、Generation 与 Audit，扩展 skill plan 有效率、fallback 率、论文识别、恢复质量、成本和失败注入评测。
+4. 在 Linux、macOS 和全新 Windows clone 上验证安装、数据准备与 Makefile/直接命令的一致性。
+5. 扩展 Hybrid Planner、真实 Retrieval、LLM Judge、Generation 与 Audit 的成本、失败注入和人工质量评测。
 6. 为候选论文增加显式用户选择与受控 ingestion manifest，并建立 title/DOI 到 canonical `doc_id` 的映射，但仍禁止 metadata 直接进入回答生成。
 7. 根据真实 hold-out 的失败分布校准 bounded replanning 触发条件，避免无收益的重复 retrieval，同时维持最大两次 revision。
 8. 为 JSONL memory 增加归档、retention、完整性审计和多进程安全方案，再评估是否迁移 SQLite。
 9. 评估是否需要比 keyword advisory 更严格的短期 session context；在有 benchmark 前不引入用户画像、Multi-Agent 或开放式自治循环。
 10. 基于真实失败样本评估条件分支或有限并行是否有明确收益；在 provenance、预算和可重复性验证完成前，不把当前线性 Skill Executor 扩展为任意工作流引擎。
-10. 增加稳定 API、并发隔离、可观测性与部署方案。
+11. 为 FastAPI 增加认证、并发隔离、请求队列、服务级指标与受控部署方案。
 
 ## Development Documentation Rule
 

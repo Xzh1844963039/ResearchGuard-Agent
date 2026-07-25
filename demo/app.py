@@ -15,16 +15,23 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from demo.utils import (
     STAGE_LABELS,
+    agent_answer_view,
+    agent_audit_view,
+    agent_plan_rows,
     answer_view,
     audit_claims,
     audit_summary,
+    evidence_bundle_view,
     evidence_sufficiency_view,
     evidence_view,
     final_status_view,
+    memory_trace_view,
     retrieval_hits,
     safe_error_message,
     sanitize_for_display,
+    skill_timeline_rows,
     stage_rows,
+    tool_call_rows,
     validate_pipeline_result,
 )
 from researchguard.agent import BoundedResearchAgentController
@@ -39,8 +46,9 @@ EXAMPLE_QUERIES = (
     "What is the difference between RAG-Sequence and RAG-Token?",
     "Does any indexed paper describe quantum error correction for superconducting qubits?",
 )
-DEMO_MODES = ("Evidence Pipeline", "Research Workflow")
+DEMO_MODES = ("Research Agent", "Evidence Pipeline")
 WORKFLOW_TASKS = {
+    "Auto Plan": None,
     "Literature Review": "literature_review",
     "Paper Comparison": "paper_comparison",
     "Claim Audit": "claim_audit",
@@ -134,7 +142,10 @@ def run_researchguard(query: str) -> dict[str, Any]:
     return validate_pipeline_result(get_pipeline().run(query))
 
 
-def run_research_workflow(query: str, task_type: str) -> dict[str, Any]:
+def run_research_workflow(
+    query: str,
+    task_type: str | None,
+) -> dict[str, Any]:
     controller = get_agent_controller()
     state = controller.run(query, task_type=task_type)
     memory_snapshot = (
@@ -319,9 +330,14 @@ def render_workflow_result(state: dict[str, Any]) -> None:
     columns[0].metric("Task Type", str(state.get("task_type") or "Unknown"))
     columns[1].metric("Workflow Selected", workflow_name)
 
-    st.markdown("## Agent Plan")
+    st.markdown("## Generated Plan")
     agent_trace = state.get("agent_trace") or {}
-    plan = state.get("plan") or agent_trace.get("plan") or []
+    plan = agent_plan_rows(
+        {
+            **state,
+            "plan": state.get("plan") or agent_trace.get("plan") or [],
+        }
+    )
     if plan:
         st.dataframe(
             plan,
@@ -331,19 +347,59 @@ def render_workflow_result(state: dict[str, Any]) -> None:
     else:
         st.info(f"Bounded workflow selected: {workflow_name}")
 
-    st.markdown("## Tool Trace")
-    steps = state.get("workflow_steps") or []
-    if steps:
+    st.markdown("## Skill Execution Timeline")
+    skills = skill_timeline_rows(state)
+    if skills:
         st.dataframe(
-            steps,
-            column_order=("step", "tool_name", "status", "latency_ms", "trace_id"),
+            skills,
+            column_order=(
+                "step",
+                "skill",
+                "status",
+                "evidence",
+                "latency_ms",
+                "trace_id",
+            ),
             hide_index=True,
             use_container_width=True,
         )
     else:
-        st.info("No workflow tools were executed.")
+        st.info("No skills were executed.")
 
-    st.markdown("## Evidence")
+    st.markdown("## Tool Calls")
+    tools = tool_call_rows(state)
+    if tools:
+        st.dataframe(
+            tools,
+            column_order=(
+                "call",
+                "tool",
+                "status",
+                "api_calls",
+                "latency_ms",
+                "trace_id",
+            ),
+            hide_index=True,
+            use_container_width=True,
+        )
+    else:
+        st.info("No registered tools were invoked.")
+
+    st.markdown("## Evidence Bundle")
+    bundle = evidence_bundle_view(state)
+    bundle_columns = st.columns(3)
+    bundle_columns[0].metric(
+        "Evidence Records",
+        bundle["evidence_count"],
+    )
+    bundle_columns[1].metric(
+        "Bundle ID",
+        bundle["bundle_id"] or "Not created",
+    )
+    bundle_columns[2].metric(
+        "Gate",
+        str((state.get("gate_decision") or {}).get("status") or "Not run"),
+    )
     evidence = state.get("evidence") or []
     if not evidence:
         st.info("No canonical corpus evidence was returned.")
@@ -361,6 +417,53 @@ def render_workflow_result(state: dict[str, Any]) -> None:
             st.write(item.get("content") or "No evidence text available.")
             st.caption(f"Chunk ID: {item.get('chunk_id') or 'Unknown'}")
 
+    st.markdown("## Grounded Answer")
+    answer = agent_answer_view(state)
+    if answer["generated"] and answer["answer"]:
+        st.markdown(
+            f'<div class="rg-answer">{html.escape(answer["answer"])}</div>',
+            unsafe_allow_html=True,
+        )
+        if answer["citations"]:
+            st.dataframe(
+                answer["citations"],
+                hide_index=True,
+                use_container_width=True,
+            )
+    else:
+        st.info(
+            str(
+                state.get("reason")
+                or "No answer was generated because the evidence gate did not allow it."
+            )
+        )
+
+    st.markdown("## Citation Audit")
+    audit = agent_audit_view(state)
+    if audit["completed"]:
+        if audit["summary"]:
+            st.json(
+                sanitize_for_display(audit["summary"]),
+                expanded=1,
+            )
+        if audit["claims"]:
+            for index, claim in enumerate(audit["claims"], start=1):
+                label = (
+                    claim.get("text")
+                    or claim.get("claim")
+                    or f"Claim {index}"
+                )
+                with st.expander(
+                    f"Claim {index} | "
+                    f"{claim.get('support_level') or claim.get('status') or 'unknown'}"
+                ):
+                    st.write(label)
+                    st.json(sanitize_for_display(claim), expanded=1)
+        else:
+            st.info("Citation audit completed without claim records.")
+    else:
+        st.info("Citation audit did not run because no guarded answer was available.")
+
     st.markdown("## Evidence Ledger")
     memory_snapshot = state.get("memory_snapshot") or {}
     ledger = memory_snapshot.get("evidence_ledger") or []
@@ -375,8 +478,9 @@ def render_workflow_result(state: dict[str, Any]) -> None:
     else:
         st.info("No claim-level evidence ledger records were created for this run.")
 
-    st.markdown("## Research Memory")
-    memory_context = state.get("memory_context") or {}
+    st.markdown("## Memory Trace")
+    memory = memory_trace_view(state)
+    memory_context = memory["context"]
     memory_columns = st.columns(3)
     memory_columns[0].metric(
         "Previous Runs",
@@ -390,8 +494,8 @@ def render_workflow_result(state: dict[str, Any]) -> None:
         "Previous Failures",
         len(memory_context.get("previous_failures") or []),
     )
-    with st.expander("Show Memory Context"):
-        st.json(sanitize_for_display(memory_context), expanded=2)
+    with st.expander("Show Memory Trace"):
+        st.json(sanitize_for_display(memory), expanded=2)
 
     st.markdown("## Evaluation Metrics")
     evaluation = state.get("evaluation") or {}
@@ -418,27 +522,6 @@ def render_workflow_result(state: dict[str, Any]) -> None:
     else:
         st.info("No runtime evaluation metrics were produced.")
 
-    st.markdown("## Final Result")
-    workflow_result = state.get("workflow_result")
-    output = workflow_result.get("output") if isinstance(workflow_result, dict) else None
-    if isinstance(output, dict):
-        summary = output.get("summary")
-        if summary:
-            st.markdown(
-                f'<div class="rg-answer">{html.escape(str(summary))}</div>',
-                unsafe_allow_html=True,
-            )
-        elif output.get("claim"):
-            st.write(output["claim"])
-            st.caption(f"Support level: {output.get('support_level', 'unknown')}")
-        else:
-            st.info("The workflow returned a structured result without a narrative summary.")
-        citations = output.get("citations") or []
-        if citations:
-            st.dataframe(citations, hide_index=True, use_container_width=True)
-    else:
-        st.info(str(state.get("reason") or "No workflow result was returned."))
-
     with st.expander("Show Agent Details"):
         st.json(sanitize_for_display(state), expanded=2)
 
@@ -453,7 +536,7 @@ def main() -> None:
         workflow_label = st.selectbox(
             "Workflow Task",
             tuple(WORKFLOW_TASKS),
-            disabled=mode != "Research Workflow",
+            disabled=mode != "Research Agent",
         )
         st.divider()
         st.markdown("### Demo Queries")
@@ -462,13 +545,13 @@ def main() -> None:
             st.session_state["query"] = selected
         st.divider()
         st.markdown("### Runtime")
-        st.caption("Pipeline v1")
-        st.caption("Workflow Skills v1")
+        st.caption("Bounded Agent v2")
+        st.caption("Dynamic Skills v1")
         st.caption("Local Chroma index")
         st.caption("Evidence gate enabled")
 
     st.title("ResearchGuard")
-    st.markdown('<p class="rg-subtitle">Evidence-grounded RAG for Scientific Papers</p>', unsafe_allow_html=True)
+    st.markdown('<p class="rg-subtitle">Evidence-Grounded Adaptive Research Agent</p>', unsafe_allow_html=True)
     st.markdown('<div class="rg-rule"></div>', unsafe_allow_html=True)
 
     if "query" not in st.session_state:
@@ -487,7 +570,7 @@ def main() -> None:
         else:
             with st.spinner("Running ResearchGuard..."):
                 try:
-                    if mode == "Research Workflow":
+                    if mode == "Research Agent":
                         st.session_state["workflow_result"] = run_research_workflow(
                             query.strip(),
                             WORKFLOW_TASKS[workflow_label],

@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-PROJECT_ROOT = Path(r"C:\Users\18449\Desktop\researchguard_workspace")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -23,7 +23,7 @@ from researchguard.retrieval.filters import apply_metadata_filters
 from researchguard.retrieval.index_loader import load_index_bundle, validate_loaded_index
 
 
-DEFAULT_CONFIG = Path(r"C:\Users\18449\Desktop\researchguard_workspace\configs\retrieval_v1.yaml")
+DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "retrieval_v1.yaml"
 MODES = ("dense", "sparse", "hybrid")
 
 

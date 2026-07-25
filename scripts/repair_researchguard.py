@@ -5,7 +5,7 @@ import shutil
 from pathlib import Path
 
 
-ROOT = Path(r"C:\Users\18449\Desktop\researchguard_workspace")
+ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_DIR = ROOT / "researchguard"
 
 HEADER_PREFIXES = (

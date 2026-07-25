@@ -13,7 +13,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-PROJECT_ROOT = Path(r"C:\Users\18449\Desktop\researchguard_workspace")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -49,7 +49,7 @@ from researchguard.retrieval.claim_verifier import (  # noqa: E402
 from researchguard.retrieval.evidence_judge import load_evidence_judge_settings  # noqa: E402
 
 
-DEFAULT_CONFIG = Path(r"C:\Users\18449\Desktop\researchguard_workspace\configs\citation_audit_v1.yaml")
+DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "citation_audit_v1.yaml"
 HARD_CHECK_KEYS = (
     "claim_parse_failure",
     "verification_schema_failure",

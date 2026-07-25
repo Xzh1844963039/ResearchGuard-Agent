@@ -1,0 +1,11 @@
+planner:
+  enabled: false
+  backend: "openai"
+  model: "gpt-4.1-mini"
+  temperature: 0
+  timeout: 30
+  max_tokens: 800
+  max_steps: 6
+  fallback_enabled: true
+  prompt_version: "deterministic_baseline_v1.0"
+  config_version: "planner_deterministic_v1.0"

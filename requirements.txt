@@ -23,6 +23,7 @@ dirtyjson==1.0.8
 distro==1.9.0
 filelock==3.29.0
 filetype==1.2.0
+fastapi==0.138.1
 flatbuffers==25.12.19
 fonttools==4.62.1
 frozenlist==1.8.0
@@ -92,6 +93,7 @@ python-dotenv==1.2.2
 python-multipart==0.0.32
 PyYAML==6.0.3
 rapidocr-onnxruntime==1.4.4
+rank-bm25==0.2.2
 referencing==0.37.0
 regex==2026.4.4
 requests==2.33.1

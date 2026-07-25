@@ -219,6 +219,131 @@ def final_status_view(result: Mapping[str, Any]) -> dict[str, str]:
     return {"status": status, "label": FINAL_STATUS_LABELS.get(status, status.title()), "tone": tone}
 
 
+def agent_plan_rows(state: Mapping[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "step": index,
+            "skill": str(item.get("skill") or item.get("tool") or "unknown"),
+            "purpose": str(item.get("purpose") or ""),
+            "expected_observation": str(
+                item.get("expected_observation") or ""
+            ),
+            "max_retry": item.get("max_retry"),
+        }
+        for index, item in enumerate(state.get("plan") or (), start=1)
+        if isinstance(item, Mapping)
+    ]
+
+
+def skill_timeline_rows(state: Mapping[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "step": index,
+            "skill": str(item.get("skill_name") or "unknown"),
+            "status": str(item.get("output_status") or "unknown"),
+            "evidence": int(item.get("evidence_count") or 0),
+            "latency_ms": float(item.get("latency_ms") or 0.0),
+            "trace_id": str(item.get("trace_id") or ""),
+        }
+        for index, item in enumerate(
+            state.get("skill_history") or (),
+            start=1,
+        )
+        if isinstance(item, Mapping)
+    ]
+
+
+def tool_call_rows(state: Mapping[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "call": index,
+            "tool": str(item.get("tool_name") or "unknown"),
+            "status": str(item.get("output_status") or "unknown"),
+            "api_calls": int(item.get("api_call_count") or 0),
+            "latency_ms": float(item.get("latency_ms") or 0.0),
+            "trace_id": str(item.get("trace_id") or ""),
+        }
+        for index, item in enumerate(state.get("tool_history") or (), start=1)
+        if isinstance(item, Mapping)
+    ]
+
+
+def evidence_bundle_view(state: Mapping[str, Any]) -> dict[str, Any]:
+    bundle = state.get("evidence_bundle")
+    if not isinstance(bundle, Mapping):
+        return {
+            "bundle_id": None,
+            "evidence_count": len(state.get("evidence") or ()),
+            "query": str(state.get("query") or ""),
+            "provenance": {},
+        }
+    records = bundle.get("evidence_records") or ()
+    return {
+        "bundle_id": bundle.get("bundle_id"),
+        "evidence_count": len(records) if isinstance(records, list) else 0,
+        "query": str(bundle.get("query") or state.get("query") or ""),
+        "provenance": dict(bundle.get("provenance") or {}),
+    }
+
+
+def agent_answer_view(state: Mapping[str, Any]) -> dict[str, Any]:
+    answer = state.get("answer")
+    if not isinstance(answer, Mapping):
+        return {
+            "generated": False,
+            "answer": "",
+            "citations": [],
+        }
+    return {
+        "generated": True,
+        "answer": str(answer.get("answer") or ""),
+        "citations": [
+            dict(item)
+            for item in answer.get("citations", ())
+            if isinstance(item, Mapping)
+        ],
+    }
+
+
+def agent_audit_view(state: Mapping[str, Any]) -> dict[str, Any]:
+    audit = state.get("audit_result")
+    if not isinstance(audit, Mapping):
+        return {"completed": False, "claims": [], "summary": {}}
+    claims = audit.get("claims", audit.get("claim_results", ()))
+    return {
+        "completed": bool(audit.get("audit_completed", True)),
+        "claims": [
+            dict(item)
+            for item in claims
+            if isinstance(item, Mapping)
+        ]
+        if isinstance(claims, list)
+        else [],
+        "summary": {
+            key: audit.get(key)
+            for key in (
+                "overall_grounded",
+                "grounding_score",
+                "unsupported_claim_count",
+                "partial_claim_count",
+                "audit_reason",
+            )
+            if key in audit
+        },
+    }
+
+
+def memory_trace_view(state: Mapping[str, Any]) -> dict[str, Any]:
+    context = state.get("memory_context")
+    snapshot = state.get("memory_snapshot")
+    status = state.get("memory_status")
+    return {
+        "status": dict(status) if isinstance(status, Mapping) else {},
+        "context": dict(context) if isinstance(context, Mapping) else {},
+        "snapshot": dict(snapshot) if isinstance(snapshot, Mapping) else {},
+    }
+
+
 def sanitize_for_display(value: Any) -> Any:
     if isinstance(value, Mapping):
         return {
