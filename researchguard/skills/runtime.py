@@ -20,9 +20,14 @@ from researchguard.tools import (
     ScholarPaperRecord,
     ToolResult,
 )
-
-
-SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
+from researchguard.workflows.claim_audit import (
+    extract_atomic_claims,
+    extract_claim_entities,
+)
+from researchguard.workflows.paper_comparison import (
+    extract_paper_specs,
+    normalize_comparison_dimensions,
+)
 
 
 def _object_schema(
@@ -161,22 +166,107 @@ class RetrieveEvidenceSkill(ResearchSkill):
     def run(self, context: SkillContext) -> SkillResult:
         started = time.perf_counter()
         papers = context.inputs.get("papers")
-        paper_specs = (
-            [item for item in papers if isinstance(item, Mapping)][:2]
-            if isinstance(papers, (list, tuple))
-            else []
+        paper_specs = extract_paper_specs(papers, context.query)
+        dimensions = normalize_comparison_dimensions(
+            context.inputs.get("comparison_dimensions")
         )
         calls: list[dict[str, Any]] = []
-        if context.task_type == "paper_comparison" and paper_specs:
+        identities: list[dict[str, Any]] = []
+        if context.task_type == "paper_comparison":
+            if len(paper_specs) != 2:
+                return self._result(
+                    started,
+                    status="rejected",
+                    reason="paper_identity_extraction_failed",
+                    output={
+                        "evidence": [],
+                        "evidence_count": 0,
+                        "paper_identities": paper_specs,
+                        "comparison_dimensions": list(dimensions),
+                    },
+                )
             for paper in paper_specs:
-                name = " ".join(str(paper.get("name", "")).split()).strip()
-                doc_id = " ".join(str(paper.get("doc_id", "")).split()).strip()
+                related_to_existing = any(
+                    self._identity_tokens(str(item["name"])).intersection(
+                        self._identity_tokens(str(paper["name"]))
+                    )
+                    for item in identities
+                )
+                identity = self._resolve_identity(
+                    context,
+                    paper,
+                    excluded_doc_ids=(
+                        ()
+                        if related_to_existing
+                        else tuple(item["doc_id"] for item in identities)
+                    ),
+                )
+                if identity is None:
+                    return self._result(
+                        started,
+                        status="rejected",
+                        reason="paper_identity_resolution_failed",
+                        output={
+                            "evidence": [],
+                            "evidence_count": 0,
+                            "paper_identities": identities,
+                            "comparison_dimensions": list(dimensions),
+                        },
+                    )
+                identities.append(identity)
+            resolved_doc_ids = [item["doc_id"] for item in identities]
+            resolved_names = [item["name"].casefold() for item in identities]
+            if (
+                len(set(resolved_doc_ids)) != len(resolved_doc_ids)
+                and len(set(resolved_names)) != len(resolved_names)
+            ):
+                return self._result(
+                    started,
+                    status="rejected",
+                    reason="paper_identity_collision",
+                    output={
+                        "evidence": [],
+                        "evidence_count": 0,
+                        "paper_identities": identities,
+                        "comparison_dimensions": list(dimensions),
+                    },
+                )
+            for paper in identities:
+                name = paper["name"]
+                doc_id = paper["doc_id"]
                 tool_input = self._tool_input(context)
                 tool_input["query"] = (
                     f"{name}: {context.query}" if name else context.query
                 )
-                if doc_id:
-                    tool_input["filters"] = {"doc_ids": [doc_id]}
+                tool_input["filters"] = {"doc_ids": [doc_id]}
+                calls.append(tool_input)
+        elif context.task_type == "claim_audit":
+            entities = extract_claim_entities(context.query)
+            if len(entities) > 1:
+                for entity in entities:
+                    tool_input = self._tool_input(context)
+                    tool_input["query"] = f"{entity}: {context.query}"
+                    calls.append(tool_input)
+            else:
+                tool_input = self._tool_input(context)
+                if re.search(
+                    r"\b(?:all|every)\s+(?:indexed\s+)?papers?\b",
+                    context.query,
+                    re.IGNORECASE,
+                ):
+                    tool_input.update(
+                        {
+                            "top_k": max(
+                                50,
+                                int(tool_input.get("top_k", 50)),
+                            ),
+                            "candidate_k": max(
+                                160,
+                                int(tool_input.get("candidate_k", 160)),
+                            ),
+                            "multi_query": True,
+                        }
+                    )
                 calls.append(tool_input)
         else:
             calls.append(self._tool_input(context))
@@ -185,7 +275,8 @@ class RetrieveEvidenceSkill(ResearchSkill):
         retrieval_rows: list[dict[str, Any]] = []
         source_bundles: list[EvidenceBundle] = []
         last_failure: ToolResult | None = None
-        for tool_input in calls:
+        identity_rows: list[dict[str, Any]] = []
+        for call_index, tool_input in enumerate(calls):
             result = context.invoke_tool("retrieve_evidence", tool_input)
             if result.status == "failed":
                 last_failure = result
@@ -193,13 +284,69 @@ class RetrieveEvidenceSkill(ResearchSkill):
             raw = result.data.get("evidence", [])
             if not isinstance(raw, list):
                 raise TypeError("Retrieval Tool returned invalid evidence.")
+            identity = (
+                identities[call_index]
+                if context.task_type == "paper_comparison"
+                else None
+            )
+            identity_chunk_ids: list[str] = []
             for item in raw:
                 record = EvidenceRecord.from_mapping(item)
-                evidence_by_id.setdefault(record.chunk_id, record.to_dict())
+                if identity is not None and record.doc_id != identity["doc_id"]:
+                    return self._result(
+                        started,
+                        status="failed",
+                        reason="comparison_evidence_identity_mismatch",
+                        output={
+                            "evidence": [],
+                            "evidence_count": 0,
+                            "paper_identities": identities,
+                            "comparison_dimensions": list(dimensions),
+                        },
+                    )
+                serialized = record.to_dict()
+                if identity is not None:
+                    provenance = dict(serialized.get("provenance", {}))
+                    provenance["comparison_identity"] = {
+                        "identity_id": identity["identity_id"],
+                        "name": identity["name"],
+                        "doc_id": identity["doc_id"],
+                    }
+                    serialized["provenance"] = provenance
+                existing = evidence_by_id.get(record.chunk_id)
+                if (
+                    existing is not None
+                    and identity is not None
+                    and existing.get("provenance", {}).get(
+                        "comparison_identity", {}
+                    ).get("identity_id") != identity["identity_id"]
+                ):
+                    continue
+                evidence_by_id.setdefault(record.chunk_id, serialized)
+                identity_chunk_ids.append(record.chunk_id)
             raw_bundle = result.data.get("evidence_bundle")
             if isinstance(raw_bundle, Mapping):
                 source_bundles.append(EvidenceBundle.from_mapping(raw_bundle))
             retrieval_rows.append(copy.deepcopy(dict(result.data)))
+            if identity is not None:
+                if not identity_chunk_ids:
+                    return self._result(
+                        started,
+                        status="rejected",
+                        reason="incomplete_comparison_evidence",
+                        output={
+                            "evidence": list(evidence_by_id.values()),
+                            "evidence_count": len(evidence_by_id),
+                            "paper_identities": identities,
+                            "comparison_dimensions": list(dimensions),
+                        },
+                    )
+                identity_rows.append(
+                    {
+                        **identity,
+                        "chunk_ids": list(dict.fromkeys(identity_chunk_ids)),
+                    }
+                )
 
         evidence = tuple(evidence_by_id.values())
         if not evidence:
@@ -233,6 +380,8 @@ class RetrieveEvidenceSkill(ResearchSkill):
                 provenance={
                     "source": "dynamic_skill_retrieval",
                     "tool_result_count": len(retrieval_rows),
+                    "paper_identities": identity_rows,
+                    "comparison_dimensions": list(dimensions),
                 },
             )
         )
@@ -252,9 +401,97 @@ class RetrieveEvidenceSkill(ResearchSkill):
                 "evidence_count": len(evidence),
                 "coverage": coverage,
                 "retrieval_count": len(calls),
+                "paper_identities": identity_rows,
+                "comparison_dimensions": list(dimensions),
             },
             evidence=evidence,
         )
+
+    def _resolve_identity(
+        self,
+        context: SkillContext,
+        paper: Mapping[str, Any],
+        *,
+        excluded_doc_ids: tuple[str, ...] = (),
+    ) -> dict[str, Any] | None:
+        name = " ".join(str(paper.get("name", "")).split()).strip()
+        identity_id = str(paper.get("identity_id", "")).strip()
+        explicit_doc_id = " ".join(
+            str(paper.get("doc_id") or "").split()
+        ).strip()
+        if explicit_doc_id:
+            return {
+                "identity_id": identity_id,
+                "name": name,
+                "doc_id": explicit_doc_id,
+                "resolution": "explicit",
+            }
+        probe_input = self._tool_input(context)
+        probe_input.update(
+            {
+                "query": name,
+                "top_k": max(10, int(probe_input.get("top_k", 10))),
+                "rewrite": False,
+                "multi_query": False,
+            }
+        )
+        result = context.invoke_tool("retrieve_evidence", probe_input)
+        if result.status == "failed":
+            return None
+        raw = result.data.get("evidence", [])
+        if not isinstance(raw, list) or not raw:
+            return None
+        identity_tokens = self._identity_tokens(name)
+        scores: dict[str, float] = defaultdict(float)
+        for index, item in enumerate(raw, start=1):
+            record = EvidenceRecord.from_mapping(item)
+            haystack = " ".join(
+                (
+                    record.doc_id,
+                    record.source,
+                    str(record.provenance.get("title", "")),
+                )
+            )
+            overlap = len(identity_tokens.intersection(
+                self._identity_tokens(haystack)
+            ))
+            scores[record.doc_id] += 1.0 / index + 2.0 * overlap
+        if not scores:
+            return None
+        eligible = {
+            doc_id: score
+            for doc_id, score in scores.items()
+            if doc_id not in set(excluded_doc_ids)
+        } or scores
+        doc_id = min(
+            eligible,
+            key=lambda item: (-eligible[item], item),
+        )
+        return {
+            "identity_id": identity_id,
+            "name": name,
+            "doc_id": doc_id,
+            "resolution": "retrieval_probe",
+        }
+
+    @staticmethod
+    def _identity_tokens(value: str) -> set[str]:
+        return {
+            token.casefold()
+            for token in re.findall(r"[A-Za-z0-9]+", value)
+            if len(token) > 1
+            and token.casefold()
+            not in {
+                "paper",
+                "method",
+                "model",
+                "original",
+                "standard",
+                "retrieval",
+                "evaluation",
+                "claim",
+            }
+        }
 
     @staticmethod
     def _tool_input(context: SkillContext) -> dict[str, Any]:
@@ -315,7 +552,7 @@ class AssessEvidenceSkill(ResearchSkill):
 class AnalyzeClaimsSkill(ResearchSkill):
     name = "analyze_claims"
     version = "1.0.0"
-    description = "Extract bounded provenance-bearing claim candidates from evidence."
+    description = "Decompose the user-supplied statement into bounded atomic claims."
     input_schema = _object_schema(
         "AnalyzeClaimsInput",
         required=("evidence_bundle",),
@@ -330,34 +567,12 @@ class AnalyzeClaimsSkill(ResearchSkill):
     def run(self, context: SkillContext) -> SkillResult:
         started = time.perf_counter()
         bundle = _bundle_from_state(context)
-        claims: list[dict[str, Any]] = []
-        for index, record in enumerate(bundle.evidence_records[:12], start=1):
-            sentences = [
-                item.strip()
-                for item in SENTENCE_RE.split(record.content)
-                if item.strip()
-            ]
-            text = (sentences[0] if sentences else record.content.strip())[:600]
-            if not text:
-                continue
-            claims.append(
-                {
-                    "claim_id": f"evidence-claim-{index}",
-                    "text": text,
-                    "chunk_id": record.chunk_id,
-                    "doc_id": record.doc_id,
-                    "section": record.section,
-                    "page": record.page,
-                    "citations": [
-                        {
-                            "chunk_id": record.chunk_id,
-                            "doc_id": record.doc_id,
-                            "section": record.section,
-                            "page": record.page,
-                        }
-                    ],
-                }
-            )
+        claim_text = str(
+            context.inputs.get("claim")
+            or getattr(context.state, "workflow_input", {}).get("claim")
+            or context.query
+        )
+        claims = list(extract_atomic_claims(claim_text))
         return self._result(
             started,
             status="success",
@@ -388,10 +603,58 @@ class CompareEvidenceSkill(ResearchSkill):
     def run(self, context: SkillContext) -> SkillResult:
         started = time.perf_counter()
         bundle = _bundle_from_state(context)
+        dimensions = normalize_comparison_dimensions(
+            context.inputs.get(
+                "comparison_dimensions",
+                bundle.provenance.get("comparison_dimensions"),
+            )
+        )
+        expected_identities = bundle.provenance.get("paper_identities", [])
+        if not isinstance(expected_identities, list) or len(expected_identities) != 2:
+            return self._result(
+                started,
+                status="rejected",
+                reason="missing_paper_identity_context",
+                output={
+                    "evidence_groups": [],
+                    "group_count": 0,
+                    "comparison_dimensions": list(dimensions),
+                    "evidence_bundle_id": bundle.bundle_id,
+                },
+                evidence=tuple(
+                    record.to_dict() for record in bundle.evidence_records
+                ),
+            )
         groups: dict[str, list[EvidenceRecord]] = defaultdict(list)
         for record in bundle.evidence_records:
-            groups[record.doc_id].append(record)
-        if len(groups) < 2:
+            identity = record.provenance.get("comparison_identity", {})
+            identity_id = (
+                str(identity.get("identity_id", ""))
+                if isinstance(identity, Mapping)
+                else ""
+            )
+            if not identity_id:
+                return self._result(
+                    started,
+                    status="failed",
+                    reason="unscoped_comparison_evidence",
+                    output={
+                        "evidence_groups": [],
+                        "group_count": len(groups),
+                        "comparison_dimensions": list(dimensions),
+                        "evidence_bundle_id": bundle.bundle_id,
+                    },
+                    evidence=tuple(
+                        item.to_dict() for item in bundle.evidence_records
+                    ),
+                )
+            groups[identity_id].append(record)
+        expected_ids = {
+            str(item.get("identity_id", ""))
+            for item in expected_identities
+            if isinstance(item, Mapping)
+        }
+        if len(groups) != 2 or set(groups) != expected_ids:
             return self._result(
                 started,
                 status="rejected",
@@ -399,27 +662,51 @@ class CompareEvidenceSkill(ResearchSkill):
                 output={
                     "evidence_groups": [],
                     "group_count": len(groups),
+                    "comparison_dimensions": list(dimensions),
                     "evidence_bundle_id": bundle.bundle_id,
                 },
                 evidence=tuple(record.to_dict() for record in bundle.evidence_records),
             )
-        rows = [
-            {
-                "doc_id": doc_id,
-                "evidence_count": len(records),
-                "chunk_ids": [record.chunk_id for record in records],
-                "sections": list(
-                    dict.fromkeys(record.section for record in records)
-                ),
-            }
-            for doc_id, records in sorted(groups.items())
-        ]
+        rows: list[dict[str, Any]] = []
+        for identity in expected_identities:
+            identity_id = str(identity["identity_id"])
+            records = groups[identity_id]
+            expected_doc_id = str(identity["doc_id"])
+            if any(record.doc_id != expected_doc_id for record in records):
+                return self._result(
+                    started,
+                    status="failed",
+                    reason="comparison_group_doc_mismatch",
+                    output={
+                        "evidence_groups": rows,
+                        "group_count": len(rows),
+                        "comparison_dimensions": list(dimensions),
+                        "evidence_bundle_id": bundle.bundle_id,
+                    },
+                    evidence=tuple(
+                        item.to_dict() for item in bundle.evidence_records
+                    ),
+                )
+            rows.append(
+                {
+                    "identity_id": identity_id,
+                    "paper_name": identity["name"],
+                    "doc_id": expected_doc_id,
+                    "evidence_count": len(records),
+                    "chunk_ids": [record.chunk_id for record in records],
+                    "sections": list(
+                        dict.fromkeys(record.section for record in records)
+                    ),
+                    "dimensions": list(dimensions),
+                }
+            )
         return self._result(
             started,
             status="success",
             output={
                 "evidence_groups": rows,
                 "group_count": len(rows),
+                "comparison_dimensions": list(dimensions),
                 "evidence_bundle_id": bundle.bundle_id,
             },
             evidence=tuple(record.to_dict() for record in bundle.evidence_records),
@@ -469,6 +756,10 @@ class AuditClaimsSkill(ResearchSkill):
             {
                 "answer": copy.deepcopy(dict(answer)),
                 "evidence_bundle": bundle.to_dict(),
+                "claims": copy.deepcopy(
+                    list(context.inputs.get("claims", []))
+                ),
+                "gate_decision": gate.to_dict(),
             },
         )
         audit = result.data.get("audit")
@@ -485,9 +776,11 @@ class AuditClaimsSkill(ResearchSkill):
             ),
             output={
                 "audit": copy.deepcopy(dict(audit)),
-                "answer_artifact": copy.deepcopy(dict(answer)),
                 "gate_decision": gate.to_dict(),
                 "support_level": gate.status,
+                "claims": copy.deepcopy(
+                    list(context.inputs.get("claims", []))
+                ),
             },
             evidence=tuple(record.to_dict() for record in bundle.evidence_records),
         )
@@ -511,7 +804,7 @@ class AuditClaimsSkill(ResearchSkill):
             for item in raw_claims
             if isinstance(item, Mapping) and str(item.get("text", "")).strip()
         ]
-        text = "\n".join(claim_texts[:5]) or context.query
+        text = "\n".join(claim_texts[:8]) or context.query
         evidence_by_id = {
             record.chunk_id: record for record in bundle.evidence_records
         }
@@ -605,18 +898,34 @@ class GenerateReportSkill(ResearchSkill):
         )
         if not isinstance(answer, Mapping):
             raise TypeError("Answer Tool returned no answer artifact.")
+        answer_text = str(answer.get("answer", "")).strip()
+        try:
+            explicit_claims = list(
+                extract_atomic_claims(answer_text, max_claims=20)
+            )
+        except ValueError:
+            explicit_claims = []
+        audit_input: dict[str, Any] = {
+            "answer": copy.deepcopy(dict(answer)),
+            "evidence_bundle": bundle.to_dict(),
+            "gate_decision": gate.to_dict(),
+        }
+        if explicit_claims:
+            audit_input["claims"] = explicit_claims
         audit_result = context.invoke_tool(
             "audit_answer",
-            {
-                "answer": copy.deepcopy(dict(answer)),
-                "evidence_bundle": bundle.to_dict(),
-            },
+            audit_input,
         )
         audit = audit_result.data.get("audit")
         if not isinstance(audit, Mapping):
             return _tool_failure(self, started, audit_result)
         status = "success" if audit_result.status == "success" else (
             "rejected" if audit_result.status == "rejected" else "failed"
+        )
+        released_answer = (
+            copy.deepcopy(dict(answer))
+            if status == "success"
+            else None
         )
         return self._result(
             started,
@@ -625,7 +934,7 @@ class GenerateReportSkill(ResearchSkill):
                 audit_result.reason or "citation_audit_failed"
             ),
             output={
-                "answer": copy.deepcopy(dict(answer)),
+                "answer": released_answer,
                 "audit": copy.deepcopy(dict(audit)),
                 "gate_decision": gate.to_dict(),
                 "evidence_bundle_id": bundle.bundle_id,

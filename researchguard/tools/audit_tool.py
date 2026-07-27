@@ -12,6 +12,7 @@ from researchguard.retrieval.claim_extractor import load_citation_audit_settings
 from researchguard.tools.contracts import (
     EvidenceBundle,
     EvidenceRecord,
+    GateDecision,
     ToolError,
     ToolResult,
     ToolSpec,
@@ -81,6 +82,8 @@ class CitationAuditTool:
             input_schema={
                 "answer": "AnswerGenerationResult or its complete serialized mapping; raw strings are rejected",
                 "evidence_bundle": "EvidenceBundle used by answer generation",
+                "claims": "optional validated atomic claims that bypass extraction but not verification",
+                "gate_decision": "strong GateDecision for the same EvidenceBundle",
                 "read_cache": "boolean",
             },
         )
@@ -106,6 +109,8 @@ class CitationAuditTool:
         evidence_bundle: EvidenceBundle | Mapping[str, Any] | None = None,
         *,
         evidence: Iterable[EvidenceRecord | Mapping[str, Any]] | None = None,
+        claims: Iterable[Mapping[str, Any]] | None = None,
+        gate_decision: GateDecision | Mapping[str, Any] | None = None,
         read_cache: bool = True,
     ) -> ToolResult:
         started = time.perf_counter()
@@ -130,6 +135,21 @@ class CitationAuditTool:
                 bundle_id = bundle.bundle_id
             else:
                 raise TypeError("evidence_bundle must be an EvidenceBundle or mapping.")
+            if gate_decision is not None:
+                gate = (
+                    gate_decision
+                    if isinstance(gate_decision, GateDecision)
+                    else GateDecision.from_mapping(gate_decision)
+                )
+                if (
+                    bundle_id is None
+                    or gate.evidence_bundle_id != bundle_id
+                    or gate.status != "strong"
+                    or not gate.answerable
+                ):
+                    raise ValueError(
+                        "Citation audit requires a strong GateDecision for the supplied bundle."
+                    )
             available = {record.chunk_id: record for record in records}
             missing = set(answer_result.evidence_chunk_ids).difference(available)
             if missing:
@@ -142,10 +162,13 @@ class CitationAuditTool:
             )
             if not selected:
                 raise ValueError("Answer artifact does not identify evidence to audit.")
+            audit_kwargs: dict[str, Any] = {"read_cache": read_cache}
+            if claims is not None:
+                audit_kwargs["claims"] = claims
             result = self._audit_pipeline().audit(
                 answer_result,
                 [record.to_retrieval_mapping() for record in selected],
-                read_cache=read_cache,
+                **audit_kwargs,
             )
             latency_ms = (time.perf_counter() - started) * 1000.0
             data = {

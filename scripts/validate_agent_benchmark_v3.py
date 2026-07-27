@@ -100,11 +100,9 @@ def workflow_input(case: Any) -> dict[str, Any]:
     if case.expected_task_type != "paper_comparison":
         return {}
     return {
-        "papers": [
-            {"name": doc_id.replace("_", " "), "doc_id": doc_id}
-            for doc_id in case.expected_doc_ids[:2]
-        ],
-        "dimensions": list(case.metadata.get("dimensions", ())),
+        "comparison_dimensions": list(
+            case.metadata.get("dimensions", ())
+        ) or None,
         "candidate_limit": 3,
     }
 

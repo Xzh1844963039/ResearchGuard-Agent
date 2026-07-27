@@ -65,13 +65,7 @@ def corpus_status(index_root: Path) -> dict[str, Any]:
 def workflow_input(question: Any) -> dict[str, Any]:
     if question.expected_task_type != "paper_comparison":
         return {}
-    return {
-        "papers": [
-            {"name": doc_id.replace("_", " "), "doc_id": doc_id}
-            for doc_id in question.expected_doc_ids
-        ],
-        "candidate_limit": 3,
-    }
+    return {"candidate_limit": 3}
 
 
 def main() -> None:

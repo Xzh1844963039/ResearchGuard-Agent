@@ -423,6 +423,18 @@ class BoundedResearchAgentController:
                 available_tools=self.registry.names,
             )
             if revision is not None:
+                if len(revision.new_plan) > self.policy.max_steps:
+                    if result.status == "rejected":
+                        return self._finish_skill_execution(
+                            state,
+                            "rejected",
+                            result.reason or "recovery_budget_exhausted",
+                        )
+                    return self._finish_skill_execution(
+                        state,
+                        "failed",
+                        "recovery_plan_exceeds_step_budget",
+                    )
                 state.plan_revisions.append(revision.to_dict())
                 state.plan = copy.deepcopy(list(revision.new_plan))
                 state.current_step += 1
@@ -542,6 +554,18 @@ class BoundedResearchAgentController:
                 available_skills=self.skill_registry.names,
             )
             if revision is not None:
+                if len(revision.new_plan) > self.policy.max_steps:
+                    if result.status == "rejected":
+                        return self._finish_skill_execution(
+                            state,
+                            "rejected",
+                            result.reason or "recovery_budget_exhausted",
+                        )
+                    return self._finish_skill_execution(
+                        state,
+                        "failed",
+                        "recovery_plan_exceeds_step_budget",
+                    )
                 state.plan_revisions.append(revision.to_dict())
                 state.plan = copy.deepcopy(list(revision.new_plan))
                 state.current_step += 1
@@ -618,6 +642,10 @@ class BoundedResearchAgentController:
             return {
                 "query": state.query,
                 "papers": state.workflow_input.get("papers"),
+                "comparison_dimensions": state.workflow_input.get(
+                    "comparison_dimensions",
+                    state.workflow_input.get("dimensions"),
+                ),
                 **parameters,
             }
         if skill_name in {
@@ -636,6 +664,11 @@ class BoundedResearchAgentController:
                     state.skill_outputs.get("analyze_claims", {}).get(
                         "claims", []
                     )
+                ),
+                "claim": state.workflow_input.get("claim", state.query),
+                "comparison_dimensions": state.workflow_input.get(
+                    "comparison_dimensions",
+                    state.workflow_input.get("dimensions"),
                 ),
                 **parameters,
             }
@@ -666,7 +699,6 @@ class BoundedResearchAgentController:
                 ),
             )
         self._record_tool_result(state, tool_name, tool_input, result)
-        self._apply_result(state, tool_name, result)
         return result
 
     def _record_skill_result(
@@ -731,7 +763,7 @@ class BoundedResearchAgentController:
         if isinstance(gate, Mapping):
             state.gate_decision = GateDecision.from_mapping(gate).to_dict()
         answer = output.get("answer", output.get("answer_artifact"))
-        if isinstance(answer, Mapping):
+        if result.status == "success" and isinstance(answer, Mapping):
             state.answer = copy.deepcopy(dict(answer))
         audit = output.get("audit")
         if isinstance(audit, Mapping):
@@ -744,6 +776,8 @@ class BoundedResearchAgentController:
         status: str,
         reason: str | None,
     ) -> ResearchAgentState:
+        if status != "completed":
+            state.answer = None
         state.set_status(status, reason)
         if state.workflow_name:
             answer = state.answer if isinstance(state.answer, Mapping) else {}

@@ -128,13 +128,17 @@ def _tokens(text: str) -> set[str]:
 def build_audit_input(
     answer_result: AnswerGenerationResult,
     passages: tuple[AnswerPassage, ...],
+    claims: tuple[ExtractedClaim, ...] | None = None,
 ) -> dict[str, Any]:
-    return {
+    value = {
         "answer": answer_result.answer,
         "answer_citations": [citation.to_dict() for citation in answer_result.citations],
         "generation_evidence_chunk_ids": list(answer_result.evidence_chunk_ids),
         "evidence_passages": [passage.to_dict() for passage in passages],
     }
+    if claims is not None:
+        value["explicit_claims"] = [claim.to_dict() for claim in claims]
+    return value
 
 
 class CitationAuditPipeline:
@@ -157,6 +161,7 @@ class CitationAuditPipeline:
         hits: Iterable[RetrievalHit | Mapping[str, Any]],
         *,
         read_cache: bool = True,
+        claims: Iterable[ExtractedClaim | Mapping[str, Any]] | None = None,
     ) -> CitationAuditResult:
         started = time.perf_counter()
         if answer_result.refused:
@@ -182,7 +187,19 @@ class CitationAuditPipeline:
                 evidence_chunk_ids=expected_ids,
             )
 
-        model_input = build_audit_input(answer_result, passages)
+        explicit_claims = self._normalize_explicit_claims(claims)
+        if claims is not None and explicit_claims is None:
+            return self._fallback_result(
+                answer_result.answer,
+                "explicit_claim_schema_failure",
+                started=started,
+                evidence_chunk_ids=expected_ids,
+            )
+        model_input = build_audit_input(
+            answer_result,
+            passages,
+            explicit_claims,
+        )
         input_hash = stable_json_hash(model_input)
         answer_hash = stable_json_hash({"answer": answer_result.answer})
         key = self.cache.make_key(
@@ -213,30 +230,38 @@ class CitationAuditPipeline:
                 )
 
         extraction_started = time.perf_counter()
-        try:
-            extraction = self.extractor.extract(answer_result.answer)
-        except ClaimExtractionBackendError as exc:
-            result = self._fallback_result(
-                answer_result.answer,
-                f"claim_extraction_failure:{type(exc.__cause__ or exc).__name__}",
-                started=started,
-                evidence_chunk_ids=expected_ids,
-                api_call_count=exc.api_call_count,
-                extraction_api_calls=exc.api_call_count,
-                extraction_latency_ms=(time.perf_counter() - extraction_started) * 1000.0,
+        if explicit_claims is not None:
+            extraction = BackendClaimExtraction(
+                claims=explicit_claims,
+                api_call_count=0,
+                input_tokens=0,
+                output_tokens=0,
             )
-            self._cache_result(key, input_hash, result)
-            return result
-        except Exception as exc:
-            result = self._fallback_result(
-                answer_result.answer,
-                f"claim_extraction_failure:{type(exc).__name__}",
-                started=started,
-                evidence_chunk_ids=expected_ids,
-                extraction_latency_ms=(time.perf_counter() - extraction_started) * 1000.0,
-            )
-            self._cache_result(key, input_hash, result)
-            return result
+        else:
+            try:
+                extraction = self.extractor.extract(answer_result.answer)
+            except ClaimExtractionBackendError as exc:
+                result = self._fallback_result(
+                    answer_result.answer,
+                    f"claim_extraction_failure:{type(exc.__cause__ or exc).__name__}",
+                    started=started,
+                    evidence_chunk_ids=expected_ids,
+                    api_call_count=exc.api_call_count,
+                    extraction_api_calls=exc.api_call_count,
+                    extraction_latency_ms=(time.perf_counter() - extraction_started) * 1000.0,
+                )
+                self._cache_result(key, input_hash, result)
+                return result
+            except Exception as exc:
+                result = self._fallback_result(
+                    answer_result.answer,
+                    f"claim_extraction_failure:{type(exc).__name__}",
+                    started=started,
+                    evidence_chunk_ids=expected_ids,
+                    extraction_latency_ms=(time.perf_counter() - extraction_started) * 1000.0,
+                )
+                self._cache_result(key, input_hash, result)
+                return result
         extraction_latency = (time.perf_counter() - extraction_started) * 1000.0
         claims = self._validate_extraction(extraction, answer_result.answer)
         if claims is None:
@@ -352,6 +377,37 @@ class CitationAuditPipeline:
         )
         self._cache_result(key, input_hash, result)
         return result
+
+    def _normalize_explicit_claims(
+        self,
+        values: Iterable[ExtractedClaim | Mapping[str, Any]] | None,
+    ) -> tuple[ExtractedClaim, ...] | None:
+        if values is None:
+            return None
+        claims: list[ExtractedClaim] = []
+        try:
+            for value in values:
+                if isinstance(value, ExtractedClaim):
+                    claim = value
+                elif isinstance(value, Mapping):
+                    claim = ExtractedClaim(
+                        claim_id=str(value.get("claim_id", value.get("id", ""))),
+                        text=str(value.get("text", "")),
+                    )
+                else:
+                    return None
+                claims.append(claim)
+        except (TypeError, ValueError):
+            return None
+        extraction = BackendClaimExtraction(
+            claims=tuple(claims),
+            api_call_count=0,
+            input_tokens=0,
+            output_tokens=0,
+        )
+        return self._validate_extraction(extraction, " ".join(
+            claim.text for claim in claims
+        ))
 
     def _prepare_generation_passages(
         self,

@@ -20,11 +20,11 @@ ResearchGuard 是一个面向科研论文的多文档 RAG 工程。它不止返�
 
 当前 Evidence Engine 主流程已经完成本地集成与验证；v2 在其上增加了 Tool Facade、受约束的单 Agent Controller、Scholarly Discovery、Research Workflow Skills、Research Memory 与 Evidence Ledger、Agent Trace、Agent Evaluation、Agent Intelligence Upgrade v1、Hybrid Planner，以及 **Dynamic Skill Composition Upgrade v1**。最新 Agent 路径使用单一 Evidence Artifact，允许 LLM 提议严格结构化的 skill plan，并由确定性 Policy Validator、Skill Executor 与执行预算共同控制；Planner 不可用或计划非法时自动回退到原确定性 Planner。历史 Agent 和早期 Audit 代码仍保留用于兼容；历史 `MemoryStore` 也继续服务迁移代码，但不承担当前 Controller 的科研过程记忆。
 
-最终工程验证状态不是“所有质量指标均已通过”：Evidence Pipeline 回归、API
-smoke test、编译和 `120/120` 单元测试通过；独立 holdout v1 为
-`PASS_WITH_LIMITATIONS`；Agent Benchmark v3 为 `FAIL`；Planner A/B 为
-`INCONCLUSIVE_FALLBACK_ONLY`。这些结论来自 2026-07-25 的完整运行结果，
-README 不以 synthetic PASS 替代真实 Agent 任务上的失败。
+最终工程验证状态来自完整真实运行：Evidence Pipeline 回归、API smoke test、
+编译和 `127/127` 单元测试通过；2026-07-27 的独立 holdout v1 与 Agent
+Benchmark v3 均为 `PASS`；Planner A/B 仍为
+`INCONCLUSIVE_FALLBACK_ONLY`。Benchmark v3 的优化前失败基线和 holdout
+剩余失败案例继续保留，README 不以 synthetic PASS 替代真实 Agent 任务结果。
 
 ## Architecture
 
@@ -571,16 +571,17 @@ Holdout 使用独立的 `holdout_indexing_v1.yaml`、
 `holdout_chroma_v1.yaml`、`holdout_retrieval_v1.yaml` 和
 `holdout_pipeline_v1.yaml`，不会把开发集 index 或 retrieval 标注混入结果。
 
-2026-07-25 完整 holdout 运行结果为 `PASS_WITH_LIMITATIONS`：10 篇论文解析为
-637 个 chunks，25 条 blind questions 全部执行完成。document
-coverage@10 与 document hit@10 均为 `1.0000`，provenance validity 为
-`1.0000`，gate bypass 为 `0`；但整体 pass rate 只有 `0.4800`，
-answer/refusal correctness 与 completion rate 均为 `0.6800`，task
-classification accuracy 为 `0.9200`，skill sequence accuracy 为
-`0.6800`，unsupported claim rate 为 `0.0286`。主要失败来自自然语言触发的
-comparison 误路由、无收益的额外 retrieval/replan、comparison 达到 step
-上限、claim extraction schema failure，以及生成或审计阶段的 API/grounding
-拒绝。完整报告位于
+2026-07-27 完整 holdout 运行结果为 `PASS`：10 篇论文解析为 637 个
+chunks，25 条 blind questions 全部执行完成。pass rate 从优化前
+`0.4800` 提升到 `0.8800`，answer/refusal correctness 与 completion rate
+从 `0.6800` 提升到 `0.9600`，skill sequence accuracy 从 `0.6800` 提升到
+`0.9200`；provenance validity 为 `1.0000`，gate bypass 为 `0`。
+document coverage@10 与 hit@10 为 `0.9200`，低于旧报告的 `1.0000`，原因是
+验证入口不再把标注中的目标 `doc_id` 注入 comparison workflow，当前结果更接近
+真实 blind execution。剩余 3 条 CHECK 包括两条 Planner 将
+“distinguish/different abstraction levels” 误判为 paper comparison，以及
+一条 Answer/Evidence backend `APIConnectionError`；它们没有被修改标注或
+特殊分支掩盖。完整报告位于
 `outputs/holdout_validation_v1/holdout_evaluation_report.md`，该目录不纳入
 Git。
 
@@ -632,14 +633,27 @@ Planner，输出 `outputs/planner_comparison_v1/planner_comparison_report.md`。
 才会判定 `HYBRID_BETTER`；全部 fallback 时明确标记为
 `INCONCLUSIVE_FALLBACK_ONLY`。
 
-2026-07-25 的完整 Agent Benchmark v3 结论为 `FAIL`。50 条任务总通过率为
-`0.6000`：literature research `0.9500`、paper comparison `0.2667`、
-claim audit `0.4667`。task classification、skill selection、plan validity
-与 provenance validity 均为 `1.0000`，evidence coverage 为 `0.9800`，
-unsupported claim rate 为 `0.0000`；但 successful completion 只有
-`0.3400`、refusal correctness 为 `0.6400`，并记录 6 次 gate-bypass
-hard check，因此不能冻结为通过版本。这里的 gate-bypass 是 benchmark 对失败
-执行路径的硬性判定，不能由其余 provenance 或 planning 指标抵消。
+优化前的完整 Agent Benchmark v3 结论为 `FAIL`：50 条任务总通过率
+`0.6000`，literature research `0.9500`、paper comparison `0.2667`、
+claim audit `0.4667`，refusal correctness `0.6400`，并记录 6 次
+gate-bypass hard check。根因包括 comparison 将目标 `doc_id` 作为运行输入但
+仍混合 evidence、partial recovery 生成 7-step plan 超过 6-step policy、
+dynamic claim analysis 错把 evidence 首句当作待核验 claim、LLM claim
+extraction schema failure，以及审计失败后中间 answer 留在 state。
+
+2026-07-27 的修复后完整复跑结论为 `PASS`：50/50 case 通过，三个类别通过率
+均为 `1.0000`，task classification、skill selection、plan validity、
+evidence coverage、provenance validity 与 refusal correctness 均为
+`1.0000`；gate bypass、invalid plan、provenance failure、result schema
+failure 和 execution exception 均为 `0`。successful completion 为
+`0.4400`，因为安全拒绝也可满足 benchmark 的 `answer_or_refuse` /
+`audit_or_refuse` 契约，不能把该值解释成总通过率。最终 cached rerun 的平均
+latency 为 `3893.42 ms`、平均 Tool calls 为 `3.98`；首次生成新 explicit
+claim cache 时延迟更高。状态分布为 literature `15 completed / 5
+rejected`、paper comparison `1 completed / 14 rejected`、claim audit
+`6 completed / 9 rejected`。因此 100% benchmark pass 主要证明 routing、
+coverage、provenance 和 fail-closed behavior 满足当前契约，不证明 15 个
+comparison 都成功生成了比较结论。
 
 同一批 50 条任务的 Planner A/B 结论为
 `INCONCLUSIVE_FALLBACK_ONLY`。Deterministic 与 Hybrid 的 routing、
@@ -671,7 +685,7 @@ Phase 6 synthetic benchmark 的 3 个 case 全部通过：task classification ac
 
 Agent Benchmark v2 的 30 个 integration cases 全部通过：task/workflow accuracy `1.0000`、plan revision accuracy `1.0000`、invalid Tool rate `0.0000`、duplicate Tool call rate `0.0000`、provenance validity `1.0000`、evidence reuse rate `1.0000`。12/30 case 发生重规划，平均 `0.4667` 次 revision；需要恢复的 case 中 `successful_recovery_rate=0.6667`，其余恢复路径按设计安全拒绝。Benchmark 包含 10 个 task routing、10 个 replanning 和 10 个 safety boundary case。
 
-Phase 8 Round 1 的 planner_v2 定向测试覆盖合法 strict JSON 与序列化、非法 JSON、Planner API 异常、未知 skill、超预算、Evidence Gate 绕过、审计后再次生成、Controller Planner Interface、deterministic fallback 与结构化 PlanRevision。Round 2 在 `tests/skills/` 增加 9 个测试，覆盖 Registry、SkillResult JSON、真实 skill execution、未知 skill、budget/cycle 拒绝、gate bypass、动态 Controller 路径与 skill-level replanning。Final Enhancement 又增加 Benchmark v3、Planner A/B、holdout、API 与 Demo v3 测试；当前全量 unittest 为 `120/120 PASS`。
+Phase 8 Round 1 的 planner_v2 定向测试覆盖合法 strict JSON 与序列化、非法 JSON、Planner API 异常、未知 skill、超预算、Evidence Gate 绕过、审计后再次生成、Controller Planner Interface、deterministic fallback 与结构化 PlanRevision。Round 2 在 `tests/skills/` 增加 Registry、SkillResult JSON、真实 skill execution、未知 skill、budget/cycle 拒绝、gate bypass、动态 Controller 路径与 skill-level replanning 测试。Reliability 修复进一步覆盖 paper identity extraction、同文档双 identity、独立 filtered retrieval、comparison provenance、atomic claim decomposition、逐 claim verification、unsupported detection、matching GateDecision 和审计失败不释放中间 answer；当前全量 unittest 为 `127/127 PASS`。
 
 最终回归还通过 `python -m compileall researchguard api scripts`、
 `scripts/validate_pipeline_v1.py` 和 `scripts/validate_api_v1.py`。Pipeline
@@ -692,6 +706,9 @@ Round 2 回归同时通过 `validate_pipeline_v1.py`、`validate_retrieval_v1.py
 - **召回与排序分离**：Hybrid/RRF 承担候选覆盖，Cross-Encoder 负责 query-chunk 相关性。
 - **生成前 fail closed**：证据不是 strong 时拒绝回答；API、JSON、schema 或 provenance 异常不会绕过 gate。
 - **生成后逐 claim 审计**：合法 chunk ID 不自动等于引用充分，claim verifier 单独判断支持关系。
+- **论文身份先解析再比较**：Paper Comparison 从 query 或显式输入提取两个 identity，通过 corpus probe 解析 canonical `doc_id`，再为每个 identity 独立 filtered retrieval；不同论文不能折叠到同一文档，同一论文内的两个方法可以共享 `doc_id`，但 chunk 必须分组去重。
+- **显式原子 claim 复用现有 verifier**：Dynamic Claim Audit 和 Agent report 对用户 statement/answer 做确定性、实体保留的 bounded decomposition，再让现有 verifier 逐 claim 核验；这避免二次 LLM extraction schema failure，但首次运行会增加逐 claim verification latency。
+- **Skill 状态事务式提交**：skill 内部 ToolResult 只记录 trace，不提前写入全局 answer/audit state；只有 skill 成功才发布 answer，failed/rejected 路径清除中间 answer。
 - **缓存键包含模型与配置版本**：rewrite、rerank、evidence、answer 和 audit cache 避免跨版本污染。
 - **阶段输出保留 provenance**：chunk、document、section、page、query variant 和 stage metadata 可追踪。
 
@@ -700,12 +717,13 @@ Round 2 回归同时通过 `validate_pipeline_v1.py`、`validate_retrieval_v1.py
 - Agent Benchmark v3 与 holdout 提高了真实执行覆盖，但 document-level labels
   仍不能替代逐 claim 专家标注；报告会保留 miss、拒绝和 parser warning，不为
   追求 PASS 修改 benchmark。
-- Agent Benchmark v3 当前为 `FAIL`：paper comparison 和 claim audit 的通过率
-  分别只有 `0.2667` 与 `0.4667`，并有 6 次 gate-bypass hard check。当前版本
-  适合展示边界受控的工程架构与失败分析，不应宣称真实 Agent 质量已经验收通过。
-- Holdout v1 虽然 document hit/coverage@10 与 provenance validity 均为
-  `1.0000`，但端到端 pass rate 只有 `0.4800`；任务路由、skill sequence、
-  bounded replanning、claim extraction 与外部 API 稳定性仍是主要短板。
+- Agent Benchmark v3 当前为 `PASS` 且 hard checks 为 0，但 benchmark 只有
+  50 条固定任务，而且 Paper Comparison 只有 1/15 completed；100% 不代表
+  开放科研问题的生成质量，也不允许据此删除 fail-closed refusal。
+- Holdout v1 当前 pass rate 为 `0.8800`，仍有两条 deterministic Planner
+  routing mismatch 和一次外部 API connection failure。文档 hit/coverage 为
+  `0.9200`，说明 query-level paper identity resolution 仍不能替代稳定的
+  title/DOI-to-`doc_id` catalog。
 - FastAPI v1 是单进程本地服务包装，没有认证、租户隔离、队列、rate limit、
   分布式 tracing 或生产部署保证；同步 Evidence Engine 调用由线程池承载，底层
   Tool timeout 仍是主要边界。

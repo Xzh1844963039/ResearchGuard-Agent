@@ -59,6 +59,13 @@ class SkillExecutor:
 
     @staticmethod
     def _validate_output(schema: Any, result: SkillResult) -> None:
+        if result.status != "success" and any(
+            isinstance(result.output.get(name), dict)
+            for name in ("answer", "answer_artifact")
+        ):
+            raise ValueError(
+                "A failed or rejected skill must not release an answer artifact."
+            )
         if result.status != "success":
             return
         required = tuple(schema.get("required", ()))

@@ -17,8 +17,111 @@ from researchguard.workflows.base import (
 )
 
 
-COMPARE_PREFIX_RE = re.compile(r"^\s*(compare|contrast)\s+", re.IGNORECASE)
-COMPARE_SPLIT_RE = re.compile(r"\s+(?:and|vs\.?|versus)\s+", re.IGNORECASE)
+COMPARE_PREFIX_RE = re.compile(
+    r"^\s*(?:(?:compare|contrast)\s+|"
+    r"(?:what\s+is\s+)?the\s+difference\s+between\s+)",
+    re.IGNORECASE,
+)
+COMPARE_SPLIT_RE = re.compile(
+    r"\s+(?:and|with|vs\.?|versus)\s+",
+    re.IGNORECASE,
+)
+COMPARISON_TAIL_RE = re.compile(
+    r"\s+(?:for|in|on)\s+"
+    r"(?:how\b|terms?\s+of\b|reducing\b|detecting\b|their\b|the\b)",
+    re.IGNORECASE,
+)
+PAPER_PHRASE_RE = re.compile(
+    r"\b(?:the\s+)?([A-Za-z][A-Za-z0-9_-]*\s+paper)\b",
+    re.IGNORECASE,
+)
+TECHNICAL_NAME_RE = re.compile(
+    r"\b(?:[A-Z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+|"
+    r"[A-Z]{2,}[A-Za-z0-9]*|"
+    r"[A-Z][a-z]+(?:[A-Z][A-Za-z0-9]+)+)\b"
+)
+DIMENSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _/().-]{0,63}$")
+
+
+def normalize_comparison_dimensions(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ("method", "dataset", "metric", "limitation")
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("comparison_dimensions must be a list.")
+    dimensions: list[str] = []
+    for item in value:
+        dimension = " ".join(str(item).split()).strip()
+        if not dimension:
+            continue
+        if not DIMENSION_RE.fullmatch(dimension):
+            raise ValueError(
+                "comparison_dimensions contains an invalid dimension label."
+            )
+        if dimension.casefold() not in {item.casefold() for item in dimensions}:
+            dimensions.append(dimension)
+    if not dimensions or len(dimensions) > 8:
+        raise ValueError(
+            "comparison_dimensions must contain between 1 and 8 unique items."
+        )
+    return tuple(dimensions)
+
+
+def extract_paper_specs(value: Any, query: str) -> list[dict[str, Any]]:
+    specs: list[dict[str, Any]] = []
+    if value is not None:
+        if not isinstance(value, (list, tuple)):
+            raise ValueError("papers must be a list.")
+        for item in value[:2]:
+            if isinstance(item, Mapping):
+                name = " ".join(str(item.get("name", "")).split()).strip()
+                doc_id = " ".join(
+                    str(item.get("doc_id") or "").split()
+                ).strip() or None
+            else:
+                name = " ".join(str(item).split()).strip()
+                doc_id = None
+            if name:
+                specs.append(
+                    {
+                        "identity_id": f"paper-{len(specs) + 1}",
+                        "name": name,
+                        "doc_id": doc_id,
+                    }
+                )
+        return specs
+
+    remainder = COMPARE_PREFIX_RE.sub("", query).strip().rstrip("?.")
+    parts = [
+        part.strip(" ,")
+        for part in COMPARE_SPLIT_RE.split(remainder)
+        if part.strip(" ,")
+    ]
+    if len(parts) > 1:
+        parts[-1] = COMPARISON_TAIL_RE.split(
+            parts[-1],
+            maxsplit=1,
+        )[0].strip()
+    for part in parts[:2]:
+        paper_phrases = PAPER_PHRASE_RE.findall(part)
+        technical_names = TECHNICAL_NAME_RE.findall(part)
+        short_phrase = len(part.split()) <= 4
+        name = (
+            part
+            if short_phrase
+            else paper_phrases[-1]
+            if paper_phrases
+            else technical_names[-1]
+            if technical_names
+            else part
+        )
+        specs.append(
+            {
+                "identity_id": f"paper-{len(specs) + 1}",
+                "name": " ".join(name.split()).strip(),
+                "doc_id": None,
+            }
+        )
+    return specs
 
 
 @dataclass(frozen=True)
@@ -81,8 +184,16 @@ class PaperComparisonWorkflow(ResearchWorkflow):
         evidence_table: list[dict[str, Any]] = []
         combined_evidence: list[dict[str, Any]] = []
         try:
-            dimensions = self._dimensions(workflow_input.get("comparison_dimensions"))
-            paper_specs = self._paper_specs(workflow_input.get("papers"), state.query)
+            dimensions = normalize_comparison_dimensions(
+                workflow_input.get(
+                    "comparison_dimensions",
+                    workflow_input.get("dimensions"),
+                )
+            )
+            paper_specs = extract_paper_specs(
+                workflow_input.get("papers"),
+                state.query,
+            )
             search_result = self._invoke(
                 state,
                 trace,
@@ -116,12 +227,52 @@ class PaperComparisonWorkflow(ResearchWorkflow):
             if len(paper_specs) != 2:
                 raise WorkflowExecutionError("Paper comparison requires exactly two identifiable papers.")
 
-            for spec in paper_specs:
+            for spec_index, spec in enumerate(paper_specs):
+                if not spec.get("doc_id"):
+                    probe_result = self._invoke(
+                        state,
+                        trace,
+                        started,
+                        "retrieve_evidence",
+                        query=spec["name"],
+                        top_k=10,
+                        rewrite=False,
+                        multi_query=False,
+                    )
+                    if probe_result.status == "failed":
+                        return self._failure(
+                            probe_result.reason or "paper_identity_resolution_failed",
+                            paper_specs,
+                            dimensions,
+                            evidence_table,
+                            trace,
+                            started_at,
+                            started,
+                        )
+                    probe_bundle = self._bundle_from_result(
+                        probe_result,
+                        query=spec["name"],
+                    )
+                    spec["doc_id"] = self._resolve_doc_id(
+                        spec["name"],
+                        probe_bundle,
+                        excluded_doc_ids=tuple(
+                            str(item.get("doc_id", ""))
+                            for item in paper_specs[:spec_index]
+                            if item.get("doc_id")
+                            and not self._identity_tokens(item["name"]).intersection(
+                                self._identity_tokens(spec["name"])
+                            )
+                        ),
+                    )
+                    if not spec["doc_id"]:
+                        raise WorkflowExecutionError(
+                            "Paper identity could not be resolved to a corpus document."
+                        )
                 kwargs: dict[str, Any] = {
                     "query": f"{spec['name']}. {state.query}",
+                    "filters": {"doc_ids": [spec["doc_id"]]},
                 }
-                if spec.get("doc_id"):
-                    kwargs["filters"] = {"doc_ids": [spec["doc_id"]]}
                 retrieval_result = self._invoke(
                     state,
                     trace,
@@ -146,8 +297,15 @@ class PaperComparisonWorkflow(ResearchWorkflow):
                 paper_evidence = [
                     record.to_dict() for record in paper_bundle.evidence_records
                 ]
+                if spec.get("doc_id") and any(
+                    item["doc_id"] != spec["doc_id"] for item in paper_evidence
+                ):
+                    raise WorkflowExecutionError(
+                        "Retrieval returned evidence outside the paper identity filter."
+                    )
                 evidence_table.append(
                     {
+                        "identity_id": spec["identity_id"],
                         "paper": spec["name"],
                         "doc_id_filter": spec.get("doc_id"),
                         "evidence": paper_evidence,
@@ -155,6 +313,25 @@ class PaperComparisonWorkflow(ResearchWorkflow):
                 )
                 combined_evidence.extend(paper_evidence)
 
+            chunk_owners: dict[str, str] = {}
+            for row in evidence_table:
+                separated: list[dict[str, Any]] = []
+                for item in row["evidence"]:
+                    chunk_id = str(item["chunk_id"])
+                    if chunk_id in chunk_owners:
+                        continue
+                    chunk_owners[chunk_id] = str(row["identity_id"])
+                    separated.append(item)
+                row["evidence"] = separated
+                if not separated:
+                    raise WorkflowExecutionError(
+                        "A paper identity has no independent comparison evidence."
+                    )
+            combined_evidence = [
+                item
+                for row in evidence_table
+                for item in row["evidence"]
+            ]
             combined_evidence = self._deduplicate_evidence(combined_evidence)
             generation_query = (
                 f"{state.query} Compare only the evidence-supported dimensions: "
@@ -283,34 +460,11 @@ class PaperComparisonWorkflow(ResearchWorkflow):
 
     @staticmethod
     def _dimensions(value: Any) -> tuple[str, ...]:
-        if value is None:
-            return ("method", "dataset", "metric", "limitation")
-        if not isinstance(value, (list, tuple)):
-            raise ValueError("comparison_dimensions must be a list.")
-        dimensions = tuple(" ".join(str(item).split()).strip() for item in value if str(item).strip())
-        if not dimensions or len(dimensions) > 8:
-            raise ValueError("comparison_dimensions must contain between 1 and 8 items.")
-        return dimensions
+        return normalize_comparison_dimensions(value)
 
     @staticmethod
     def _paper_specs(value: Any, query: str) -> list[dict[str, Any]]:
-        specs: list[dict[str, Any]] = []
-        if value is not None:
-            if not isinstance(value, (list, tuple)):
-                raise ValueError("papers must be a list.")
-            for item in value[:2]:
-                if isinstance(item, Mapping):
-                    name = " ".join(str(item.get("name", "")).split()).strip()
-                    doc_id = " ".join(str(item.get("doc_id", "")).split()).strip() or None
-                else:
-                    name = " ".join(str(item).split()).strip()
-                    doc_id = None
-                if name:
-                    specs.append({"name": name, "doc_id": doc_id})
-            return specs
-        remainder = COMPARE_PREFIX_RE.sub("", query).strip().rstrip("?.")
-        parts = [part.strip(" ,") for part in COMPARE_SPLIT_RE.split(remainder) if part.strip(" ,")]
-        return [{"name": part, "doc_id": None} for part in parts[:2]]
+        return extract_paper_specs(value, query)
 
     @staticmethod
     def _deduplicate_evidence(evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -322,6 +476,50 @@ class PaperComparisonWorkflow(ResearchWorkflow):
                 seen.add(chunk_id)
                 result.append(item)
         return result
+
+    @staticmethod
+    def _resolve_doc_id(
+        name: str,
+        bundle: EvidenceBundle,
+        *,
+        excluded_doc_ids: tuple[str, ...] = (),
+    ) -> str | None:
+        name_tokens = PaperComparisonWorkflow._identity_tokens(name)
+        scores: dict[str, float] = {}
+        for index, record in enumerate(bundle.evidence_records, start=1):
+            haystack = " ".join(
+                (
+                    record.doc_id,
+                    record.source,
+                    str(record.provenance.get("title", "")),
+                )
+            )
+            tokens = {
+                token.casefold()
+                for token in re.findall(r"[A-Za-z0-9]+", haystack)
+                if len(token) > 1
+            }
+            scores[record.doc_id] = scores.get(record.doc_id, 0.0) + (
+                1.0 / index + 2.0 * len(name_tokens.intersection(tokens))
+            )
+        if not scores:
+            return None
+        eligible = {
+            doc_id: score
+            for doc_id, score in scores.items()
+            if doc_id not in set(excluded_doc_ids)
+        } or scores
+        return min(eligible, key=lambda item: (-eligible[item], item))
+
+    @staticmethod
+    def _identity_tokens(value: str) -> set[str]:
+        return {
+            token.casefold()
+            for token in re.findall(r"[A-Za-z0-9]+", value)
+            if len(token) > 1
+            and token.casefold()
+            not in {"paper", "method", "model", "original", "standard"}
+        }
 
     def _rejected(
         self,

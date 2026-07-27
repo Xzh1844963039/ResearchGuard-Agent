@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Mapping
@@ -13,6 +14,93 @@ from researchguard.workflows.base import (
     WorkflowResult,
     utc_timestamp,
 )
+
+
+CLAIM_PREFIX_RE = re.compile(
+    r"^\s*(?:verify|check|audit|validate)\s+"
+    r"(?:the\s+)?(?:claim|statement)\s+that\s+",
+    re.IGNORECASE,
+)
+CLAIM_SENTENCE_RE = re.compile(r"(?<=[.!?;])\s+")
+COORDINATED_PREDICATE_RE = re.compile(
+    r"\s+and\s+(?=(?:also\s+)?(?:is|are|was|were|has|have|had|"
+    r"uses?|requires?|compares?|retrieves?|detects?|triggers?|"
+    r"reports?|shows?|improves?|reduces?|excludes?|treats?)\b)",
+    re.IGNORECASE,
+)
+PREDICATE_RE = re.compile(
+    r"\b(?:is|are|was|were|has|have|had|uses?|requires?|compares?|"
+    r"retrieves?|detects?|triggers?|reports?|shows?|improves?|reduces?|"
+    r"excludes?|treats?)\b",
+    re.IGNORECASE,
+)
+CLAIM_PAPER_ENTITY_RE = re.compile(
+    r"\b(?:the\s+)?([A-Za-z][A-Za-z0-9_-]*\s+paper)\b",
+    re.IGNORECASE,
+)
+CLAIM_TECHNICAL_ENTITY_RE = re.compile(
+    r"\b(?:[A-Z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+|"
+    r"[A-Z]{2,}[A-Za-z0-9]*|"
+    r"[A-Z][a-z]+(?:[A-Z][A-Za-z0-9]+)+)\b"
+)
+
+
+def extract_atomic_claims(value: str, *, max_claims: int = 8) -> tuple[dict[str, str], ...]:
+    claim = " ".join(str(value).split()).strip()
+    claim = CLAIM_PREFIX_RE.sub("", claim).strip()
+    if not claim:
+        raise ValueError("Claim text must not be empty.")
+    fragments: list[str] = []
+    for sentence in CLAIM_SENTENCE_RE.split(claim):
+        sentence_fragments = COORDINATED_PREDICATE_RE.split(sentence)
+        subject = ""
+        first_predicate = PREDICATE_RE.search(sentence_fragments[0])
+        if first_predicate is not None:
+            subject = sentence_fragments[0][: first_predicate.start()].strip()
+        for index, fragment in enumerate(sentence_fragments):
+            normalized = fragment.strip(" ;")
+            if index and subject and PREDICATE_RE.match(normalized):
+                normalized = f"{subject} {normalized}"
+            if normalized:
+                fragments.append(normalized)
+    deduplicated: list[str] = []
+    seen: set[str] = set()
+    for fragment in fragments:
+        key = fragment.casefold()
+        if key not in seen:
+            seen.add(key)
+            deduplicated.append(fragment)
+    if not deduplicated or len(deduplicated) > max_claims:
+        raise ValueError(
+            f"Claim decomposition must produce between 1 and {max_claims} claims."
+        )
+    return tuple(
+        {"claim_id": f"c{index}", "text": text}
+        for index, text in enumerate(deduplicated, start=1)
+    )
+
+
+def extract_claim_entities(value: str, *, max_entities: int = 8) -> tuple[str, ...]:
+    claim = CLAIM_PREFIX_RE.sub("", " ".join(str(value).split()).strip())
+    entities: list[str] = []
+    for match in CLAIM_PAPER_ENTITY_RE.finditer(claim):
+        entities.append(" ".join(match.group(1).split()))
+    for match in CLAIM_TECHNICAL_ENTITY_RE.finditer(claim):
+        entity = match.group(0)
+        prefix = claim[max(0, match.start() - 12):match.start()].strip().split()
+        if prefix and prefix[-1].casefold() in {"standard", "corrective", "original"}:
+            entity = f"{prefix[-1]} {entity}"
+        entities.append(entity)
+    result: list[str] = []
+    seen: set[str] = set()
+    for entity in entities:
+        key = entity.casefold()
+        if key not in seen:
+            seen.add(key)
+            result.append(entity)
+        if len(result) == max_entities:
+            break
+    return tuple(result)
 
 
 @dataclass(frozen=True)
@@ -58,6 +146,7 @@ class ClaimAuditWorkflow(ResearchWorkflow):
         trace: list[dict[str, Any]] = []
         workflow_input = state.workflow_input if isinstance(state.workflow_input, Mapping) else {}
         claim = " ".join(str(workflow_input.get("claim") or state.query).split()).strip()
+        atomic_claims = extract_atomic_claims(claim)
         evidence: list[dict[str, Any]] = []
         support_level = "unknown"
         citations: list[dict[str, Any]] = []
@@ -147,7 +236,7 @@ class ClaimAuditWorkflow(ResearchWorkflow):
                 for item in selected_evidence
             ]
             claim_artifact = {
-                "answer": claim,
+                "answer": "\n".join(item["text"] for item in atomic_claims),
                 "citations": citations,
                 "confidence": float(assessment.get("confidence", 0.0)),
                 "refused": False,
@@ -173,6 +262,8 @@ class ClaimAuditWorkflow(ResearchWorkflow):
                 "audit_answer",
                 answer=claim_artifact,
                 evidence_bundle=bundle.to_dict(),
+                claims=list(atomic_claims),
+                gate_decision=gate.to_dict(),
             )
             audit = audit_result.data.get("audit")
             audit = dict(audit) if isinstance(audit, Mapping) else None

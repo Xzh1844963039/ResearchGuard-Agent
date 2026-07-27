@@ -21,6 +21,7 @@ from researchguard.skills import (
     SkillResult,
     build_default_skill_registry,
 )
+from researchguard.skills.runtime import RetrieveEvidenceSkill
 from researchguard.tools import (
     EvidenceBundle,
     GateDecision,
@@ -29,6 +30,11 @@ from researchguard.tools import (
     ToolSpec,
 )
 from researchguard.tracing import TraceCollector
+from researchguard.workflows.claim_audit import (
+    extract_atomic_claims,
+    extract_claim_entities,
+)
+from researchguard.workflows.paper_comparison import extract_paper_specs
 
 
 EVIDENCE = {
@@ -86,6 +92,7 @@ def make_registry(
     *,
     unsupported: bool = False,
     empty_first: bool = False,
+    audit_failure: bool = False,
 ) -> tuple[ToolRegistry, Counter[str]]:
     registry = ToolRegistry()
     calls: Counter[str] = Counter()
@@ -172,6 +179,12 @@ def make_registry(
 
     def audit(**kwargs: Any) -> ToolResult:
         calls["audit_answer"] += 1
+        if audit_failure:
+            return result(
+                "audit_answer",
+                status="failed",
+                reason="citation_audit_failed",
+            )
         return result(
             "audit_answer",
             data={
@@ -199,6 +212,193 @@ def make_registry(
 
 
 class DynamicSkillTests(unittest.TestCase):
+    def test_paper_identity_and_atomic_claim_extraction(self) -> None:
+        specs = extract_paper_specs(
+            None,
+            "Compare SelfCheckGPT with CRAG for reducing hallucination risk.",
+        )
+        claims = extract_atomic_claims(
+            "Verify the claim that CRAG uses an evaluator and triggers corrective retrieval."
+        )
+        entities = extract_claim_entities(
+            "Verify the statement that CRAG and standard RAG use identical control."
+        )
+
+        self.assertEqual(
+            [item["name"] for item in specs],
+            ["SelfCheckGPT", "CRAG"],
+        )
+        self.assertEqual(
+            [item["text"] for item in claims],
+            [
+                "CRAG uses an evaluator",
+                "CRAG triggers corrective retrieval.",
+            ],
+        )
+        self.assertEqual(entities, ("CRAG", "standard RAG"))
+
+    def test_comparison_retrieval_resolves_and_separates_papers(self) -> None:
+        tools = ToolRegistry()
+        evidence_by_doc = {
+            "paper_hallucination": {
+                **EVIDENCE,
+                "chunk_id": "paper_hallucination::chunk-1",
+                "doc_id": "paper_hallucination",
+                "source": "SelfCheckGPT",
+                "content": "SelfCheckGPT compares sampled responses.",
+            },
+            "paper_corrective_rag": {
+                **EVIDENCE,
+                "chunk_id": "paper_corrective_rag::chunk-1",
+                "doc_id": "paper_corrective_rag",
+                "source": "CRAG",
+            },
+        }
+        retrieval_inputs: list[dict[str, Any]] = []
+
+        def retrieve(**kwargs: Any) -> ToolResult:
+            retrieval_inputs.append(dict(kwargs))
+            filters = kwargs.get("filters", {})
+            doc_ids = filters.get("doc_ids", []) if isinstance(filters, Mapping) else []
+            if doc_ids:
+                doc_id = str(doc_ids[0])
+            else:
+                doc_id = (
+                    "paper_hallucination"
+                    if "selfcheckgpt" in str(kwargs["query"]).casefold()
+                    else "paper_corrective_rag"
+                )
+            evidence = evidence_by_doc[doc_id]
+            bundle = EvidenceBundle.create(
+                query=str(kwargs["query"]),
+                evidence=[evidence],
+            )
+            return result(
+                "retrieve_evidence",
+                data={
+                    "evidence": [evidence],
+                    "evidence_bundle": bundle.to_dict(),
+                    "retrieval": {"coverage": 1.0},
+                },
+            )
+
+        tools.register(StaticTool("retrieve_evidence", retrieve))
+        for name in (
+            "assess_evidence",
+            "generate_grounded_answer",
+            "audit_answer",
+            "search_scholarly_sources",
+        ):
+            tools.register(StaticTool(name, lambda _name=name, **_: result(_name)))
+        state = ResearchAgentState(
+            "Compare SelfCheckGPT with CRAG for hallucination risk.",
+            task_type="paper_comparison",
+        )
+
+        value = SkillExecutor(build_default_skill_registry(tools)).execute(
+            "retrieve_evidence",
+            SkillContext(
+                query=state.query,
+                task_type=state.task_type,
+                state=state,
+                inputs={
+                    "query": state.query,
+                    "papers": None,
+                    "comparison_dimensions": ["goal", "mechanism"],
+                },
+                invoke_tool=lambda name, inputs: tools.invoke(
+                    name,
+                    **dict(inputs),
+                ),
+            ),
+        )
+
+        self.assertEqual(value.status, "success", value.to_dict())
+        self.assertEqual(value.output["evidence_count"], 2)
+        self.assertEqual(
+            {item["doc_id"] for item in value.output["paper_identities"]},
+            {"paper_hallucination", "paper_corrective_rag"},
+        )
+        self.assertEqual(
+            value.output["comparison_dimensions"],
+            ["goal", "mechanism"],
+        )
+        self.assertEqual(
+            {
+                item["provenance"]["comparison_identity"]["identity_id"]
+                for item in value.output["evidence"]
+            },
+            {"paper-1", "paper-2"},
+        )
+        filtered = [
+            item["filters"]["doc_ids"][0]
+            for item in retrieval_inputs
+            if item.get("filters")
+        ]
+        self.assertEqual(
+            filtered,
+            ["paper_hallucination", "paper_corrective_rag"],
+        )
+
+    def test_distinct_paper_identities_do_not_collapse_to_top_probe_doc(
+        self,
+    ) -> None:
+        corrective = {
+            **EVIDENCE,
+            "chunk_id": "paper_corrective_rag::chunk-1",
+            "doc_id": "paper_corrective_rag",
+            "source": "CRAG",
+        }
+        original = {
+            **EVIDENCE,
+            "chunk_id": "paper_rag::chunk-1",
+            "doc_id": "paper_rag",
+            "source": "Retrieval-Augmented Generation",
+        }
+
+        def invoke(_: str, values: Mapping[str, Any]) -> ToolResult:
+            bundle = EvidenceBundle.create(
+                query=str(values["query"]),
+                evidence=[corrective, original],
+            )
+            return result(
+                "retrieve_evidence",
+                data={
+                    "evidence": [corrective, original],
+                    "evidence_bundle": bundle.to_dict(),
+                },
+            )
+
+        state = ResearchAgentState(
+            "Compare CRAG and the original RAG method.",
+            task_type="paper_comparison",
+        )
+        context = SkillContext(
+            query=state.query,
+            task_type=state.task_type,
+            state=state,
+            inputs={"query": state.query},
+            invoke_tool=invoke,
+        )
+        skill = RetrieveEvidenceSkill()
+
+        first = skill._resolve_identity(
+            context,
+            {"identity_id": "paper-1", "name": "CRAG", "doc_id": None},
+        )
+        second = skill._resolve_identity(
+            context,
+            {
+                "identity_id": "paper-2",
+                "name": "the original RAG method",
+                "doc_id": None,
+            },
+            excluded_doc_ids=(str(first["doc_id"]),),
+        )
+
+        self.assertEqual(first["doc_id"], "paper_corrective_rag")
+        self.assertEqual(second["doc_id"], "paper_rag")
+
     def test_skill_registry_exposes_runtime_contracts(self) -> None:
         tools, _ = make_registry()
         skills = build_default_skill_registry(tools)
@@ -396,6 +596,18 @@ class DynamicSkillTests(unittest.TestCase):
         self.assertTrue(state.audit_result["overall_grounded"])
         trace = TraceCollector().collect(state)
         self.assertEqual(trace.skill_calls[0]["skill_name"], "retrieve_evidence")
+
+    def test_failed_audit_does_not_release_intermediate_answer(self) -> None:
+        tools, _ = make_registry(audit_failure=True)
+
+        state = BoundedResearchAgentController(
+            registry=tools,
+            memory_enabled=False,
+        ).run("How does CRAG work?")
+
+        self.assertEqual(state.status, "failed")
+        self.assertIsNone(state.answer)
+        self.assertIsNone(state.audit_result)
 
     def test_skill_replanning_is_bounded_and_observation_driven(self) -> None:
         tools, _ = make_registry(empty_first=True)

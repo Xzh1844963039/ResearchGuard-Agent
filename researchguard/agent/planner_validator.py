@@ -164,6 +164,18 @@ class PlannerValidator:
         if task_type in {"qa", "comparison", "literature_review", "paper_comparison"}:
             if not generates:
                 errors.append("answering_plan_missing_generate_report")
+        if task_type == "paper_comparison":
+            if "compare_evidence" not in skills:
+                errors.append("paper_comparison_requires_compare_evidence")
+            elif (
+                retrieve_index is not None
+                and skills.index("compare_evidence") < retrieve_index
+            ):
+                errors.append("paper_comparison_before_retrieval")
+            if generates and "compare_evidence" in skills and (
+                skills.index("compare_evidence") > skills.index("generate_report")
+            ):
+                errors.append("paper_comparison_after_generation")
 
         if task_type == "claim_audit":
             if not evidence_available or not audits:
@@ -172,6 +184,8 @@ class PlannerValidator:
                 errors.append("claim_audit_requires_claim_analysis")
             if generates:
                 errors.append("claim_audit_must_not_generate_report")
+            if audits and skills.index("audit_claims") != len(skills) - 1:
+                errors.append("audit_claims_must_be_final_skill")
 
         if task_type == "audit":
             if not has_answer:

@@ -465,16 +465,34 @@ def _planned_skills(state: Any) -> list[str]:
 
 
 def _gate_bypass_attempts(state: Any) -> int:
+    attempts = 0
+    for item in getattr(state, "tool_history", ()):
+        if not isinstance(item, Mapping):
+            continue
+        tool_name = str(item.get("tool_name", ""))
+        if tool_name not in {"generate_grounded_answer", "audit_answer"}:
+            continue
+        summary = item.get("input_summary", {})
+        gate_status = (
+            summary.get("gate_status")
+            if isinstance(summary, Mapping)
+            else None
+        )
+        if gate_status != "strong":
+            attempts += 1
+
+    status = str(getattr(state, "status", ""))
     answer = getattr(state, "answer", None)
-    if not isinstance(answer, Mapping):
-        return 0
-    gate = getattr(state, "gate_decision", None)
     audit = getattr(state, "audit_result", None)
-    gate_strong = isinstance(gate, Mapping) and gate.get("status") == "strong"
-    audit_completed = isinstance(audit, Mapping) and bool(
-        audit.get("audit_completed", True)
-    )
-    return int(not gate_strong) + int(not audit_completed)
+    if status == "completed" and isinstance(answer, Mapping):
+        audit_completed = isinstance(audit, Mapping) and bool(
+            audit.get("audit_completed", True)
+        )
+        if not audit_completed:
+            attempts += 1
+    if status in {"failed", "rejected"} and isinstance(answer, Mapping):
+        attempts += 1
+    return attempts
 
 
 def _refusal_correctness(state: Any, expected_behavior: str) -> bool:

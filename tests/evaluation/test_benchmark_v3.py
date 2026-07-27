@@ -87,8 +87,14 @@ class AgentBenchmarkV3Tests(unittest.TestCase):
             tool_history=[
                 {"tool_name": "retrieve_evidence"},
                 {"tool_name": "assess_evidence"},
-                {"tool_name": "generate_grounded_answer"},
-                {"tool_name": "audit_answer"},
+                {
+                    "tool_name": "generate_grounded_answer",
+                    "input_summary": {"gate_status": "strong"},
+                },
+                {
+                    "tool_name": "audit_answer",
+                    "input_summary": {"gate_status": "strong"},
+                },
             ],
             evidence=[EVIDENCE],
             gate_decision={"status": "strong"},
@@ -116,6 +122,57 @@ class AgentBenchmarkV3Tests(unittest.TestCase):
             result["metrics"]["token_cost_usd"],
             0.00002,
         )
+
+    def test_failed_audit_without_released_answer_is_not_gate_bypass(self) -> None:
+        case = AgentBenchmarkCaseV3(
+            case_id="audit-failure",
+            category="claim_audit",
+            query="Verify a claim.",
+            expected_task_type="claim_audit",
+            expected_skill_pattern=(
+                "retrieve_evidence",
+                "analyze_claims",
+                "audit_claims",
+            ),
+            expected_behavior="audit_or_refuse",
+            difficulty="hard",
+            expected_doc_ids=("paper_rag",),
+        )
+        state = ResearchAgentState(
+            query=case.query,
+            task_type="claim_audit",
+            planner_plan={
+                "skills": [
+                    {"skill": "retrieve_evidence"},
+                    {"skill": "analyze_claims"},
+                    {"skill": "audit_claims"},
+                ]
+            },
+            planner_metadata={"validation": {"valid": True}},
+            skill_history=[
+                {"skill_name": "retrieve_evidence"},
+                {"skill_name": "analyze_claims"},
+                {"skill_name": "audit_claims"},
+            ],
+            tool_history=[
+                {
+                    "tool_name": "audit_answer",
+                    "input_summary": {"gate_status": "strong"},
+                    "output_status": "failed",
+                }
+            ],
+            evidence=[EVIDENCE],
+            gate_decision={"status": "strong"},
+            answer=None,
+            audit_result=None,
+            status="failed",
+            reason="citation_audit_failed",
+        )
+
+        result = evaluate_benchmark_v3_run(state, case)
+
+        self.assertEqual(result["metrics"]["gate_bypass_attempts"], 0)
+        self.assertIn("execution_failure", result["issues"])
 
     def test_report_distinguishes_quality_limitations_from_hard_failure(
         self,
