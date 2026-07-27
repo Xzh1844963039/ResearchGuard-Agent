@@ -1,4 +1,4 @@
-# C:\Users\18449\Desktop\researchguard_workspace\scripts\validate_parser_v5.py
+# scripts/validate_parser_v5.py
 from __future__ import annotations
 
 import json

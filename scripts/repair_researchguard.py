@@ -1,4 +1,4 @@
-# C:\Users\18449\Desktop\researchguard_workspace\scripts\repair_researchguard.py
+# scripts/repair_researchguard.py
 from __future__ import annotations
 
 import shutil

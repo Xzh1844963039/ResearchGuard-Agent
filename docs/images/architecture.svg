@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="620" viewBox="0 0 1200 620" role="img" aria-labelledby="title desc">
+  <title id="title">ResearchGuard-Agent architecture</title>
+  <desc id="desc">A bounded agent runtime orchestrates the ResearchGuard evidence engine and verification pipeline.</desc>
+  <defs>
+    <style>
+      .bg { fill: #ffffff; }
+      .band { fill: #f6f8f7; stroke: #d7ded9; stroke-width: 1.5; }
+      .box { fill: #ffffff; stroke: #9eaaa3; stroke-width: 1.5; }
+      .agent { fill: #e8f3ed; stroke: #287052; }
+      .evidence { fill: #eaf2f7; stroke: #2d6785; }
+      .verify { fill: #fff3df; stroke: #9b641f; }
+      .text { fill: #17201b; font-family: Inter, "Segoe UI", Arial, sans-serif; font-size: 17px; }
+      .small { fill: #5f6b64; font-family: Inter, "Segoe UI", Arial, sans-serif; font-size: 14px; }
+      .label { fill: #344039; font-family: Inter, "Segoe UI", Arial, sans-serif; font-size: 13px; font-weight: 700; }
+      .title { fill: #17201b; font-family: Inter, "Segoe UI", Arial, sans-serif; font-size: 26px; font-weight: 700; }
+      .arrow { stroke: #69766f; stroke-width: 2; fill: none; marker-end: url(#arrowhead); }
+      .dash { stroke-dasharray: 6 5; }
+    </style>
+    <marker id="arrowhead" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#69766f"/>
+    </marker>
+  </defs>
+  <rect class="bg" width="1200" height="620"/>
+  <text class="title" x="50" y="48">ResearchGuard-Agent</text>
+  <text class="small" x="50" y="74">Evidence-Grounded Adaptive Research Agent for Scientific Papers</text>
+
+  <rect class="band" x="40" y="104" width="1120" height="146" rx="7"/>
+  <text class="label" x="62" y="132">AGENT RUNTIME</text>
+  <rect class="box agent" x="72" y="158" width="190" height="60" rx="6"/>
+  <text class="text" x="167" y="183" text-anchor="middle">Hybrid Planner</text>
+  <text class="small" x="167" y="204" text-anchor="middle">deterministic fallback</text>
+  <rect class="box agent" x="320" y="158" width="190" height="60" rx="6"/>
+  <text class="text" x="415" y="194" text-anchor="middle">Policy Validator</text>
+  <rect class="box agent" x="568" y="158" width="190" height="60" rx="6"/>
+  <text class="text" x="663" y="183" text-anchor="middle">Bounded Controller</text>
+  <text class="small" x="663" y="204" text-anchor="middle">budget · retry · replan</text>
+  <rect class="box agent" x="816" y="158" width="190" height="60" rx="6"/>
+  <text class="text" x="911" y="183" text-anchor="middle">Dynamic Skills</text>
+  <text class="small" x="911" y="204" text-anchor="middle">registered tool calls</text>
+  <path class="arrow" d="M262 188 H320"/>
+  <path class="arrow" d="M510 188 H568"/>
+  <path class="arrow" d="M758 188 H816"/>
+
+  <rect class="band" x="40" y="278" width="1120" height="146" rx="7"/>
+  <text class="label" x="62" y="306">EVIDENCE ENGINE</text>
+  <rect class="box evidence" x="72" y="332" width="190" height="60" rx="6"/>
+  <text class="text" x="167" y="357" text-anchor="middle">Scientific Corpus</text>
+  <text class="small" x="167" y="378" text-anchor="middle">parser · chunks · indexes</text>
+  <rect class="box evidence" x="320" y="332" width="190" height="60" rx="6"/>
+  <text class="text" x="415" y="357" text-anchor="middle">Hybrid Retrieval</text>
+  <text class="small" x="415" y="378" text-anchor="middle">Dense · BM25 · RRF</text>
+  <rect class="box evidence" x="568" y="332" width="190" height="60" rx="6"/>
+  <text class="text" x="663" y="357" text-anchor="middle">Cross-Encoder</text>
+  <text class="small" x="663" y="378" text-anchor="middle">candidate reranking</text>
+  <rect class="box evidence" x="816" y="332" width="190" height="60" rx="6"/>
+  <text class="text" x="911" y="357" text-anchor="middle">Evidence Bundle</text>
+  <text class="small" x="911" y="378" text-anchor="middle">canonical provenance</text>
+  <path class="arrow" d="M262 362 H320"/>
+  <path class="arrow" d="M510 362 H568"/>
+  <path class="arrow" d="M758 362 H816"/>
+  <path class="arrow" d="M911 218 V332"/>
+
+  <rect class="band" x="40" y="452" width="1120" height="126" rx="7"/>
+  <text class="label" x="62" y="480">VERIFICATION AND TRACE</text>
+  <rect class="box verify" x="106" y="504" width="200" height="48" rx="6"/>
+  <text class="text" x="206" y="534" text-anchor="middle">Evidence Gate</text>
+  <rect class="box verify" x="366" y="504" width="200" height="48" rx="6"/>
+  <text class="text" x="466" y="534" text-anchor="middle">Grounded Answer</text>
+  <rect class="box verify" x="626" y="504" width="200" height="48" rx="6"/>
+  <text class="text" x="726" y="534" text-anchor="middle">Citation Audit</text>
+  <rect class="box" x="886" y="504" width="200" height="48" rx="6"/>
+  <text class="text" x="986" y="524" text-anchor="middle">Memory / Trace</text>
+  <text class="small" x="986" y="543" text-anchor="middle">ledger · run record</text>
+  <path class="arrow" d="M306 528 H366"/>
+  <path class="arrow" d="M566 528 H626"/>
+  <path class="arrow" d="M826 528 H886"/>
+  <path class="arrow" d="M911 392 C911 440 206 430 206 504"/>
+  <path class="arrow dash" d="M663 218 C663 258 986 260 986 504"/>
+</svg>

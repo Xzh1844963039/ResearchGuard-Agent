@@ -1,4 +1,4 @@
-# C:\Users\18449\Desktop\researchguard_workspace\scripts\run_local_rag_validation.py
+# scripts/run_local_rag_validation.py
 from __future__ import annotations
 
 import json

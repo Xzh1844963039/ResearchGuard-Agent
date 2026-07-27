@@ -1,4 +1,4 @@
-# C:\Users\18449\Desktop\researchguard_workspace\scripts\validate_agent_benchmark_v2.py
+# scripts/validate_agent_benchmark_v2.py
 from __future__ import annotations
 
 import argparse

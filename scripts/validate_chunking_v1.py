@@ -1,4 +1,4 @@
-# C:\Users\18449\Desktop\researchguard_workspace\scripts\validate_chunking_v1.py
+# scripts/validate_chunking_v1.py
 from __future__ import annotations
 
 import hashlib

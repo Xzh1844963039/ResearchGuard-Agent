@@ -1,4 +1,4 @@
-# C:\Users\18449\Desktop\researchguard_workspace\api\app.py
+# api/app.py
 from __future__ import annotations
 
 from functools import lru_cache

@@ -1,4 +1,4 @@
-# C:\Users\18449\Desktop\researchguard_workspace\demo\app.py
+# demo/app.py
 from __future__ import annotations
 
 import html
@@ -85,6 +85,30 @@ PAGE_CSS = """
     p, label, li { letter-spacing: 0; }
     .rg-subtitle { color: var(--rg-muted); font-size: 1rem; margin: 0 0 1.65rem 0; }
     .rg-rule { border-top: 1px solid var(--rg-line); margin: 0 0 1.5rem 0; }
+    .rg-flow {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        border-top: 1px solid var(--rg-line);
+        border-bottom: 1px solid var(--rg-line);
+        margin: 0 0 1.65rem;
+    }
+    .rg-flow-step {
+        position: relative;
+        padding: .8rem .7rem;
+        color: var(--rg-muted);
+        font-size: .74rem;
+        font-weight: 750;
+        text-align: center;
+        text-transform: uppercase;
+    }
+    .rg-flow-step:not(:last-child) { border-right: 1px solid var(--rg-line); }
+    .rg-flow-step strong {
+        display: block;
+        color: var(--rg-ink);
+        font-size: .87rem;
+        margin-bottom: .1rem;
+        text-transform: none;
+    }
     .rg-final { border-left: 4px solid var(--rg-green); background: var(--rg-green-soft); padding: .85rem 1rem; border-radius: 4px; }
     .rg-final.warning { border-left-color: var(--rg-amber); background: var(--rg-amber-soft); }
     .rg-final.error { border-left-color: var(--rg-red); background: var(--rg-red-soft); }
@@ -120,9 +144,13 @@ PAGE_CSS = """
     @media (max-width: 760px) {
         .block-container { padding-top: 1.25rem; }
         .rg-stage-grid { grid-template-columns: 1fr 1fr; }
+        .rg-flow { grid-template-columns: 1fr 1fr; }
+        .rg-flow-step { border-bottom: 1px solid var(--rg-line); }
     }
     @media (max-width: 480px) {
         .rg-stage-grid { grid-template-columns: 1fr; }
+        .rg-flow { grid-template-columns: 1fr; }
+        .rg-flow-step:not(:last-child) { border-right: 0; }
     }
 </style>
 """
@@ -326,9 +354,18 @@ def render_workflow_result(state: dict[str, Any]) -> None:
         """,
         unsafe_allow_html=True,
     )
-    columns = st.columns(2)
+    columns = st.columns(3)
     columns[0].metric("Task Type", str(state.get("task_type") or "Unknown"))
     columns[1].metric("Workflow Selected", workflow_name)
+    planner_metadata = state.get("planner_metadata") or {}
+    columns[2].metric(
+        "Planner",
+        str(
+            planner_metadata.get("mode")
+            or planner_metadata.get("planner_type")
+            or "Deterministic"
+        ).replace("_", " ").title(),
+    )
 
     st.markdown("## Generated Plan")
     agent_trace = state.get("agent_trace") or {}
@@ -347,7 +384,8 @@ def render_workflow_result(state: dict[str, Any]) -> None:
     else:
         st.info(f"Bounded workflow selected: {workflow_name}")
 
-    st.markdown("## Skill Execution Timeline")
+    st.markdown("## Execution Trace")
+    st.markdown("### Skill Timeline")
     skills = skill_timeline_rows(state)
     if skills:
         st.dataframe(
@@ -366,7 +404,7 @@ def render_workflow_result(state: dict[str, Any]) -> None:
     else:
         st.info("No skills were executed.")
 
-    st.markdown("## Tool Calls")
+    st.markdown("### Tool Calls")
     tools = tool_call_rows(state)
     if tools:
         st.dataframe(
@@ -385,7 +423,7 @@ def render_workflow_result(state: dict[str, Any]) -> None:
     else:
         st.info("No registered tools were invoked.")
 
-    st.markdown("## Evidence Bundle")
+    st.markdown("## Evidence")
     bundle = evidence_bundle_view(state)
     bundle_columns = st.columns(3)
     bundle_columns[0].metric(
@@ -464,7 +502,19 @@ def render_workflow_result(state: dict[str, Any]) -> None:
     else:
         st.info("Citation audit did not run because no guarded answer was available.")
 
-    st.markdown("## Evidence Ledger")
+    st.markdown("## Memory / Run Info")
+    run_columns = st.columns(3)
+    run_columns[0].metric("Run ID", str(state.get("run_id") or "Unknown"))
+    run_columns[1].metric(
+        "Plan Revisions",
+        len(state.get("plan_revisions") or []),
+    )
+    run_columns[2].metric(
+        "Tool Calls",
+        len(state.get("tool_history") or []),
+    )
+
+    st.markdown("### Evidence Ledger")
     memory_snapshot = state.get("memory_snapshot") or {}
     ledger = memory_snapshot.get("evidence_ledger") or []
     if ledger:
@@ -478,7 +528,7 @@ def render_workflow_result(state: dict[str, Any]) -> None:
     else:
         st.info("No claim-level evidence ledger records were created for this run.")
 
-    st.markdown("## Memory Trace")
+    st.markdown("### Memory Trace")
     memory = memory_trace_view(state)
     memory_context = memory["context"]
     memory_columns = st.columns(3)
@@ -497,7 +547,7 @@ def render_workflow_result(state: dict[str, Any]) -> None:
     with st.expander("Show Memory Trace"):
         st.json(sanitize_for_display(memory), expanded=2)
 
-    st.markdown("## Evaluation Metrics")
+    st.markdown("### Runtime Evaluation")
     evaluation = state.get("evaluation") or {}
     metrics = evaluation.get("metrics") or {}
     if metrics:
@@ -552,7 +602,18 @@ def main() -> None:
 
     st.title("ResearchGuard")
     st.markdown('<p class="rg-subtitle">Evidence-Grounded Adaptive Research Agent</p>', unsafe_allow_html=True)
-    st.markdown('<div class="rg-rule"></div>', unsafe_allow_html=True)
+    st.markdown(
+        """
+        <div class="rg-flow">
+            <div class="rg-flow-step"><strong>Plan</strong>Hybrid + fallback</div>
+            <div class="rg-flow-step"><strong>Compose</strong>Bounded skills</div>
+            <div class="rg-flow-step"><strong>Retrieve</strong>Canonical evidence</div>
+            <div class="rg-flow-step"><strong>Verify</strong>Evidence gate</div>
+            <div class="rg-flow-step"><strong>Audit</strong>Claim provenance</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     if "query" not in st.session_state:
         st.session_state["query"] = EXAMPLE_QUERIES[0]

@@ -1,4 +1,4 @@
-# C:\Users\18449\Desktop\researchguard_workspace\scripts\compare_planners_v1.py
+# scripts/compare_planners_v1.py
 from __future__ import annotations
 
 import argparse
