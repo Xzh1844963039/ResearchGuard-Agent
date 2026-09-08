@@ -10,7 +10,11 @@ from pathlib import Path
 from typing import Any, Mapping
 
 
-AGENT_STATE_SCHEMA_VERSION = "researchguard.agent_state.v1"
+AGENT_STATE_SCHEMA_VERSION = "researchguard.agent_state.v2"
+SUPPORTED_AGENT_STATE_SCHEMAS = {
+    "researchguard.agent_state.v1",
+    AGENT_STATE_SCHEMA_VERSION,
+}
 
 
 def utc_timestamp() -> str:
@@ -24,6 +28,8 @@ class ResearchAgentState:
     plan: list[dict[str, Any]] = field(default_factory=list)
     planner_plan: dict[str, Any] | None = None
     planner_metadata: dict[str, Any] = field(default_factory=dict)
+    subgoals: list[dict[str, Any]] = field(default_factory=list)
+    subgoal_results: dict[str, dict[str, Any]] = field(default_factory=dict)
     workflow_name: str | None = None
     workflow_input: dict[str, Any] = field(default_factory=dict)
     workflow_steps: list[dict[str, Any]] = field(default_factory=list)
@@ -88,6 +94,8 @@ class ResearchAgentState:
             "plan": copy.deepcopy(self.plan),
             "planner_plan": copy.deepcopy(self.planner_plan),
             "planner_metadata": copy.deepcopy(self.planner_metadata),
+            "subgoals": copy.deepcopy(self.subgoals),
+            "subgoal_results": copy.deepcopy(self.subgoal_results),
             "workflow_name": self.workflow_name,
             "workflow_input": copy.deepcopy(self.workflow_input),
             "workflow_steps": copy.deepcopy(self.workflow_steps),
@@ -117,7 +125,7 @@ class ResearchAgentState:
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "ResearchAgentState":
         schema_version = str(value.get("schema_version", ""))
-        if schema_version != AGENT_STATE_SCHEMA_VERSION:
+        if schema_version not in SUPPORTED_AGENT_STATE_SCHEMAS:
             raise ValueError(f"Unsupported agent state schema: {schema_version or 'missing'}")
         return cls(
             query=str(value.get("query", "")),
@@ -127,6 +135,8 @@ class ResearchAgentState:
             planner_metadata=copy.deepcopy(
                 dict(value.get("planner_metadata", {}))
             ),
+            subgoals=copy.deepcopy(list(value.get("subgoals", []))),
+            subgoal_results=copy.deepcopy(dict(value.get("subgoal_results", {}))),
             workflow_name=(
                 str(value["workflow_name"])
                 if value.get("workflow_name") is not None
@@ -159,7 +169,7 @@ class ResearchAgentState:
             created_at=str(value.get("created_at", utc_timestamp())),
             updated_at=str(value.get("updated_at", utc_timestamp())),
             run_id=str(value.get("run_id", f"agent-{uuid.uuid4().hex}")),
-            schema_version=schema_version,
+            schema_version=AGENT_STATE_SCHEMA_VERSION,
         )
 
     def to_json(self, *, indent: int | None = None) -> str:

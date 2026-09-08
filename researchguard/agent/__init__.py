@@ -14,6 +14,7 @@ from researchguard.agent.planner import AgentPlan, BoundedPlanner, PlanStep, Pla
 from researchguard.agent.planner_schema import (
     PlanBudget,
     PlanSchemaError,
+    ResearchSubgoal,
     StructuredPlan,
     StructuredPlanStep,
 )
@@ -47,6 +48,7 @@ __all__ = [
     "PlannerValidator",
     "PlanRevision",
     "ResearchAgentState",
+    "ResearchSubgoal",
     "StructuredPlan",
     "StructuredPlanStep",
     "load_hybrid_planner_settings",

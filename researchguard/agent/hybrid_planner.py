@@ -1,6 +1,7 @@
 # C:\Users\18449\Desktop\researchguard_workspace\researchguard\agent\hybrid_planner.py
 from __future__ import annotations
 
+import copy
 import json
 import os
 import time
@@ -96,6 +97,7 @@ class PlannerOutcome:
             "api_call_count": self.api_call_count,
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
+            "subgoal_count": len(self.structured_plan.subgoals),
             "created_at": self.created_at,
         }
 
@@ -167,10 +169,16 @@ class OpenAIPlannerBackend:
         schema = self._json_schema(skills)
         instructions = (
             "You propose a bounded research plan; you do not execute tools and do not answer the query. "
+            "Decompose only goals with multiple independent evidence needs into two to four subgoals. "
+            "For a simple task return an empty subgoals array. Each subgoal must have a stable id, "
+            "an answerable research question, an objective, and an observable success criterion. "
+            "A subgoal retrieval step must use that id and repeat the exact subgoal question in "
+            "parameters.query; unrelated steps use null. Do not add redundant subgoals or skills. "
             "Use only the supplied skill names. generate_report is a protected composite skill that "
             "requires canonical evidence, enforces the Evidence Gate, generates through the guarded "
             "Answer Tool, and completes Citation Audit before success. search_papers and "
             "search_scholarly_sources return metadata only and cannot support an answer. "
+            "External metadata or abstracts must never be represented as canonical evidence. "
             "claim_audit must use audit_claims and must not generate a report. "
             "Keep reasoning_summary to one concise sentence; "
             "do not reveal private chain-of-thought. Respect every supplied budget exactly or more strictly."
@@ -198,7 +206,7 @@ class OpenAIPlannerBackend:
             text={
                 "format": {
                     "type": "json_schema",
-                    "name": "researchguard_structured_plan_v1",
+                    "name": "researchguard_structured_plan_v2",
                     "schema": schema,
                     "strict": True,
                 }
@@ -231,6 +239,29 @@ class OpenAIPlannerBackend:
                     "enum": list(SUPPORTED_TASK_TYPES),
                 },
                 "goal": {"type": "string", "minLength": 1},
+                "subgoals": {
+                    "type": "array",
+                    "maxItems": 4,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "subgoal_id": {"type": "string", "minLength": 1},
+                            "question": {"type": "string", "minLength": 1},
+                            "objective": {"type": "string", "minLength": 1},
+                            "success_criterion": {
+                                "type": "string",
+                                "minLength": 1,
+                            },
+                        },
+                        "required": [
+                            "subgoal_id",
+                            "question",
+                            "objective",
+                            "success_criterion",
+                        ],
+                        "additionalProperties": False,
+                    },
+                },
                 "skills": {
                     "type": "array",
                     "minItems": 1,
@@ -251,12 +282,27 @@ class OpenAIPlannerBackend:
                                 "type": "integer",
                                 "minimum": 0,
                             },
+                            "subgoal_id": {
+                                "type": ["string", "null"],
+                            },
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "query": {
+                                        "type": ["string", "null"],
+                                    },
+                                },
+                                "required": ["query"],
+                                "additionalProperties": False,
+                            },
                         },
                         "required": [
                             "skill",
                             "purpose",
                             "expected_observation",
                             "max_retry",
+                            "subgoal_id",
+                            "parameters",
                         ],
                         "additionalProperties": False,
                     },
@@ -273,6 +319,7 @@ class OpenAIPlannerBackend:
             "required": [
                 "task_type",
                 "goal",
+                "subgoals",
                 "skills",
                 "budget",
                 "reasoning_summary",
@@ -415,6 +462,8 @@ class DeterministicPlanner:
                 purpose=step.purpose,
                 optional=False,
                 max_retry=step.max_retry,
+                parameters=step.parameters,
+                subgoal_id=step.subgoal_id,
             )
             for index, step in enumerate(plan.steps, start=1)
         )
@@ -489,7 +538,9 @@ class HybridPlanner:
             if not isinstance(response, PlannerBackendResponse):
                 response = PlannerBackendResponse(payload=response)
             backend_response = response
-            payload = self._parse_payload(response.payload)
+            payload = self._normalize_contract_fields(
+                self._parse_payload(response.payload)
+            )
             structured = StructuredPlan.from_mapping(payload)
             if task_type is not None and structured.task_type != task_type:
                 raise PlanSchemaError(
@@ -549,6 +600,55 @@ class HybridPlanner:
         if not isinstance(parsed, Mapping):
             raise PlanSchemaError("Planner JSON output must be an object.")
         return parsed
+
+    def _normalize_contract_fields(
+        self,
+        value: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        payload = copy.deepcopy(dict(value))
+        payload.setdefault("subgoals", [])
+        raw_steps = payload.get("skills")
+        if not isinstance(raw_steps, list):
+            return payload
+        normalized_steps: list[Any] = []
+        subgoal_questions = {
+            str(item.get("subgoal_id", "")): str(item.get("question", ""))
+            for item in payload.get("subgoals", [])
+            if isinstance(item, Mapping)
+        }
+        protected_report_present = any(
+            isinstance(item, Mapping)
+            and str(item.get("skill", "")) == "generate_report"
+            for item in raw_steps
+        )
+        for raw_step in raw_steps:
+            if not isinstance(raw_step, Mapping):
+                normalized_steps.append(raw_step)
+                continue
+            step = copy.deepcopy(dict(raw_step))
+            skill_name = str(step.get("skill", ""))
+            if protected_report_present and skill_name == "assess_evidence":
+                continue
+            if skill_name in self.skills.names:
+                step["expected_observation"] = self.skills.get(
+                    skill_name
+                ).output_type
+            step.setdefault("subgoal_id", None)
+            step.setdefault("parameters", {})
+            if skill_name == "retrieve_evidence":
+                subgoal_id = str(step.get("subgoal_id") or "")
+                if subgoal_id in subgoal_questions:
+                    parameters = dict(step.get("parameters", {}) or {})
+                    parameters["query"] = subgoal_questions[subgoal_id]
+                    step["parameters"] = parameters
+            else:
+                step["subgoal_id"] = None
+                parameters = dict(step.get("parameters", {}) or {})
+                parameters.pop("query", None)
+                step["parameters"] = parameters
+            normalized_steps.append(step)
+        payload["skills"] = normalized_steps
+        return payload
 
     def _compile_plan(
         self,

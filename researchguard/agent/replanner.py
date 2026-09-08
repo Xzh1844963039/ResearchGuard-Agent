@@ -134,15 +134,22 @@ class BoundedReplanner:
         skill_name: str,
         result: SkillResult,
         available_skills: tuple[str, ...],
+        step: Mapping[str, Any] | None = None,
     ) -> PlanRevision | None:
         if len(state.plan_revisions) >= self.max_revisions:
             return None
-        observation = self._skill_observation(skill_name, result)
+        observation = self._skill_observation(skill_name, result, step=step)
+        subgoal_id = str(observation.get("subgoal_id") or "").strip() or None
         reasons = {
             str(item.get("reason", "")) for item in state.plan_revisions
         }
         has_expanded_retrieval = any(
-            reason.startswith("expanded_retrieval") for reason in reasons
+            str(item.get("reason", "")).startswith("expanded_retrieval")
+            and (
+                not subgoal_id
+                or item.get("observation", {}).get("subgoal_id") == subgoal_id
+            )
+            for item in state.plan_revisions
         )
 
         if skill_name == "retrieve_evidence":
@@ -150,13 +157,22 @@ class BoundedReplanner:
             coverage_low = bool(observation.get("coverage_low", False))
             if result.status == "failed" or evidence_count == 0 or coverage_low:
                 if not has_expanded_retrieval:
+                    if subgoal_id:
+                        return self._expanded_subgoal_skill_retrieval(
+                            state,
+                            observation,
+                            reason="expanded_retrieval_for_missing_subgoal",
+                        )
                     return self._expanded_skill_retrieval(
                         state,
                         observation,
                         reason="expanded_retrieval_after_miss",
                     )
                 if (
-                    "scholarly_discovery_after_retrieval_miss" not in reasons
+                    not self._has_scholarly_fallback(
+                        state,
+                        subgoal_id=subgoal_id,
+                    )
                     and "search_papers" in available_skills
                 ):
                     return self._skill_scholarly_fallback(
@@ -181,6 +197,42 @@ class BoundedReplanner:
                     reason="expanded_retrieval_after_partial_evidence",
                 )
         return None
+
+    def _expanded_subgoal_skill_retrieval(
+        self,
+        state: ResearchAgentState,
+        observation: Mapping[str, Any],
+        *,
+        reason: str,
+    ) -> PlanRevision:
+        current = copy.deepcopy(state.plan[state.current_step])
+        parameters = copy.deepcopy(dict(current.get("parameters", {}) or {}))
+        parameters.update(
+            {
+                "rewrite": True,
+                "multi_query": True,
+                "top_k": self.expanded_top_k,
+                "candidate_k": self.expanded_candidate_k,
+                "read_cache": False,
+            }
+        )
+        current.update(
+            {
+                "purpose": (
+                    "Target the missing subgoal with expanded canonical retrieval."
+                ),
+                "parameters": parameters,
+                "recovery_terminal": False,
+                "max_retry": 1,
+            }
+        )
+        return self._revision(
+            state,
+            observation,
+            [current],
+            reason,
+            preserve_remaining=True,
+        )
 
     def _expanded_skill_retrieval(
         self,
@@ -251,6 +303,8 @@ class BoundedReplanner:
         *,
         reason: str,
     ) -> PlanRevision:
+        subgoal_id = str(observation.get("subgoal_id") or "").strip() or None
+        query = str(observation.get("subgoal_question") or state.query)
         return self._revision(
             state,
             observation,
@@ -262,7 +316,8 @@ class BoundedReplanner:
                         "Discover metadata-only candidates after corpus retrieval "
                         "failed; do not treat them as evidence."
                     ),
-                    "parameters": {"limit": 5},
+                    "parameters": {"limit": 5, "query": query},
+                    "subgoal_id": subgoal_id,
                     "recovery_terminal": True,
                     "max_retry": 1,
                 }
@@ -347,10 +402,17 @@ class BoundedReplanner:
         observation: Mapping[str, Any],
         recovery_steps: list[dict[str, Any]],
         reason: str,
+        *,
+        preserve_remaining: bool = False,
     ) -> PlanRevision:
         previous = copy.deepcopy(state.plan)
         completed = copy.deepcopy(state.plan[: state.current_step + 1])
-        combined = completed + recovery_steps
+        remaining = (
+            copy.deepcopy(state.plan[state.current_step + 1 :])
+            if preserve_remaining
+            else []
+        )
+        combined = completed + recovery_steps + remaining
         for index, step in enumerate(combined, start=1):
             step["step_id"] = index
         return PlanRevision(
@@ -398,7 +460,12 @@ class BoundedReplanner:
     def _skill_observation(
         skill_name: str,
         result: SkillResult,
+        *,
+        step: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
+        step_value = dict(step or {})
+        subgoal_id = str(step_value.get("subgoal_id") or "").strip() or None
+        parameters = dict(step_value.get("parameters", {}) or {})
         coverage = result.output.get("coverage")
         return {
             "skill_name": skill_name,
@@ -416,4 +483,21 @@ class BoundedReplanner:
             "error_code": result.output.get("error_code"),
             "retryable": bool(result.output.get("retryable", False)),
             "trace_id": result.trace_id,
+            "subgoal_id": subgoal_id,
+            "subgoal_question": parameters.get("query"),
         }
+
+    @staticmethod
+    def _has_scholarly_fallback(
+        state: ResearchAgentState,
+        *,
+        subgoal_id: str | None,
+    ) -> bool:
+        return any(
+            item.get("reason") == "scholarly_discovery_after_retrieval_miss"
+            and (
+                not subgoal_id
+                or item.get("observation", {}).get("subgoal_id") == subgoal_id
+            )
+            for item in state.plan_revisions
+        )

@@ -27,7 +27,25 @@ class PlanValidationResult:
 
 
 class PlannerValidator:
-    version = "1.0.0"
+    version = "2.0.0"
+    max_subgoals = 4
+    _STEP_PARAMETERS = {
+        "retrieve_evidence": {
+            "query",
+            "top_k",
+            "candidate_k",
+            "read_cache",
+            "rewrite",
+            "multi_query",
+        },
+        "search_papers": {"query", "limit", "sources"},
+        "search_scholarly_sources": {"query", "limit", "sources"},
+        "compare_evidence": {"comparison_dimensions"},
+        "assess_evidence": set(),
+        "analyze_claims": set(),
+        "audit_claims": set(),
+        "generate_report": set(),
+    }
 
     def __init__(
         self,
@@ -63,6 +81,22 @@ class PlannerValidator:
         if plan.budget.max_plan_revisions > self.policy.max_plan_revisions:
             errors.append("plan_budget_exceeds_policy_revisions")
 
+        subgoal_ids = [item.subgoal_id for item in plan.subgoals]
+        normalized_questions = [
+            " ".join(item.question.casefold().split()) for item in plan.subgoals
+        ]
+        if len(plan.subgoals) > self.max_subgoals:
+            errors.append("max_subgoals_exceeded")
+        if len(plan.subgoals) == 1:
+            errors.append("single_subgoal_is_unnecessary")
+        if len(subgoal_ids) != len(set(subgoal_ids)):
+            errors.append("duplicate_subgoal_id")
+        if len(normalized_questions) != len(set(normalized_questions)):
+            errors.append("duplicate_subgoal_question")
+        if plan.subgoals and plan.task_type not in {"qa", "literature_review"}:
+            errors.append("subgoals_not_supported_for_task_type")
+        subgoals_by_id = {item.subgoal_id: item for item in plan.subgoals}
+
         skill_names = [step.skill for step in plan.steps]
         duplicates = sorted(
             {
@@ -71,8 +105,17 @@ class PlannerValidator:
                 if skill_names.count(name) > 1
             }
         )
-        if duplicates:
-            errors.append("skill_cycle_or_duplicate:" + ",".join(duplicates))
+        for duplicate in duplicates:
+            matching_steps = [
+                step for step in plan.steps if step.skill == duplicate
+            ]
+            repeated_subgoals = [step.subgoal_id for step in matching_steps]
+            if (
+                duplicate != "retrieve_evidence"
+                or any(not item for item in repeated_subgoals)
+                or len(repeated_subgoals) != len(set(repeated_subgoals))
+            ):
+                errors.append(f"skill_cycle_or_duplicate:{duplicate}")
         estimated_tool_calls = 0
         for index, step in enumerate(plan.steps, start=1):
             if step.skill not in self.skills.names:
@@ -91,8 +134,46 @@ class PlannerValidator:
                 errors.append(f"step_retry_exceeds_plan_budget:{index}")
             if step.max_retry > self.policy.max_retry:
                 errors.append(f"step_retry_exceeds_policy:{index}")
+            unknown_parameters = sorted(
+                set(step.parameters).difference(
+                    self._STEP_PARAMETERS.get(step.skill, set())
+                )
+            )
+            if unknown_parameters:
+                errors.append(
+                    f"unsupported_step_parameters:{index}:"
+                    + ",".join(unknown_parameters)
+                )
+            if step.subgoal_id is not None:
+                subgoal = subgoals_by_id.get(step.subgoal_id)
+                if subgoal is None:
+                    errors.append(f"unknown_step_subgoal:{index}:{step.subgoal_id}")
+                if step.skill != "retrieve_evidence":
+                    errors.append(f"subgoal_requires_retrieval_skill:{index}")
+                query = step.parameters.get("query")
+                if subgoal is not None and (
+                    not isinstance(query, str)
+                    or " ".join(query.casefold().split())
+                    != " ".join(subgoal.question.casefold().split())
+                ):
+                    errors.append(f"subgoal_query_mismatch:{index}")
+            elif step.parameters.get("query") is not None:
+                errors.append(f"step_query_without_subgoal:{index}")
         if estimated_tool_calls > plan.budget.max_tool_calls:
             errors.append("estimated_tool_calls_exceed_plan_budget")
+
+        if plan.subgoals:
+            retrieval_subgoals = [
+                step.subgoal_id
+                for step in plan.steps
+                if step.skill == "retrieve_evidence" and step.subgoal_id
+            ]
+            for subgoal_id in subgoal_ids:
+                count = retrieval_subgoals.count(subgoal_id)
+                if count == 0:
+                    errors.append(f"subgoal_without_retrieval:{subgoal_id}")
+                elif count > 1:
+                    errors.append(f"duplicate_subgoal_retrieval:{subgoal_id}")
 
         if "generate_grounded_answer" in skill_names:
             errors.append("raw_answer_generator_is_not_a_skill")
@@ -110,6 +191,7 @@ class PlannerValidator:
             valid=not errors,
             reason=None if not errors else "invalid_plan",
             errors=tuple(dict.fromkeys(errors)),
+            validator_version=self.version,
         )
 
     @staticmethod

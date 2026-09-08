@@ -65,6 +65,7 @@ class PlanStep:
     recovery_terminal: bool = False
     max_retry: int | None = None
     skill: str | None = None
+    subgoal_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -76,6 +77,7 @@ class PlanStep:
             "recovery_terminal": self.recovery_terminal,
             "max_retry": self.max_retry,
             "skill": self.skill,
+            "subgoal_id": self.subgoal_id,
         }
 
 

@@ -3,11 +3,15 @@ from __future__ import annotations
 
 import copy
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 
-STRUCTURED_PLAN_SCHEMA_VERSION = "researchguard.structured_plan.v1"
+STRUCTURED_PLAN_SCHEMA_VERSION = "researchguard.structured_plan.v2"
+SUPPORTED_PLAN_SCHEMA_VERSIONS = {
+    "researchguard.structured_plan.v1",
+    STRUCTURED_PLAN_SCHEMA_VERSION,
+}
 
 
 class PlanSchemaError(ValueError):
@@ -74,11 +78,58 @@ class PlanBudget:
 
 
 @dataclass(frozen=True)
+class ResearchSubgoal:
+    subgoal_id: str
+    question: str
+    objective: str
+    success_criterion: str
+
+    def __post_init__(self) -> None:
+        for label, value in (
+            ("subgoal_id", self.subgoal_id),
+            ("question", self.question),
+            ("objective", self.objective),
+            ("success_criterion", self.success_criterion),
+        ):
+            if not str(value).strip():
+                raise PlanSchemaError(f"Subgoal {label} must not be empty.")
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "ResearchSubgoal":
+        _strict_keys(
+            value,
+            required={
+                "subgoal_id",
+                "question",
+                "objective",
+                "success_criterion",
+            },
+            label="research subgoal",
+        )
+        return cls(
+            subgoal_id=str(value["subgoal_id"]).strip(),
+            question=str(value["question"]).strip(),
+            objective=str(value["objective"]).strip(),
+            success_criterion=str(value["success_criterion"]).strip(),
+        )
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "subgoal_id": self.subgoal_id,
+            "question": self.question,
+            "objective": self.objective,
+            "success_criterion": self.success_criterion,
+        }
+
+
+@dataclass(frozen=True)
 class StructuredPlanStep:
     skill: str
     purpose: str
     expected_observation: str
     max_retry: int
+    subgoal_id: str | None = None
+    parameters: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.skill.strip():
@@ -91,12 +142,33 @@ class StructuredPlanStep:
             raise PlanSchemaError("Plan step max_retry must be an integer.")
         if self.max_retry < 0:
             raise PlanSchemaError("Plan step max_retry must not be negative.")
+        normalized_subgoal_id = (
+            str(self.subgoal_id).strip() if self.subgoal_id is not None else None
+        )
+        object.__setattr__(self, "subgoal_id", normalized_subgoal_id or None)
+        if not isinstance(self.parameters, Mapping):
+            raise PlanSchemaError("Plan step parameters must be an object.")
+        normalized_parameters = {
+            key: copy.deepcopy(value)
+            for key, value in dict(self.parameters).items()
+            if value is not None
+        }
+        if any(not isinstance(key, str) for key in normalized_parameters):
+            raise PlanSchemaError("Plan step parameter names must be strings.")
+        try:
+            json.dumps(normalized_parameters, ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise PlanSchemaError(
+                "Plan step parameters must be JSON serializable."
+            ) from exc
+        object.__setattr__(self, "parameters", normalized_parameters)
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "StructuredPlanStep":
         _strict_keys(
             value,
             required={"skill", "purpose", "expected_observation", "max_retry"},
+            optional={"subgoal_id", "parameters"},
             label="plan step",
         )
         return cls(
@@ -104,6 +176,12 @@ class StructuredPlanStep:
             purpose=str(value["purpose"]).strip(),
             expected_observation=str(value["expected_observation"]).strip(),
             max_retry=value["max_retry"],
+            subgoal_id=(
+                str(value["subgoal_id"]).strip()
+                if value.get("subgoal_id") is not None
+                else None
+            ),
+            parameters=dict(value.get("parameters", {}) or {}),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -112,6 +190,8 @@ class StructuredPlanStep:
             "purpose": self.purpose,
             "expected_observation": self.expected_observation,
             "max_retry": self.max_retry,
+            "subgoal_id": self.subgoal_id,
+            "parameters": copy.deepcopy(dict(self.parameters)),
         }
 
 
@@ -123,6 +203,7 @@ class StructuredPlan:
     budget: PlanBudget
     reasoning_summary: str
     planner_version: str
+    subgoals: tuple[ResearchSubgoal, ...] = ()
     schema_version: str = STRUCTURED_PLAN_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
@@ -149,7 +230,7 @@ class StructuredPlan:
                 "reasoning_summary",
                 "planner_version",
             },
-            optional={"schema_version"},
+            optional={"schema_version", "subgoals"},
             label="structured plan",
         )
         raw_steps = value["skills"]
@@ -163,8 +244,13 @@ class StructuredPlan:
         schema_version = str(
             value.get("schema_version", STRUCTURED_PLAN_SCHEMA_VERSION)
         )
-        if schema_version != STRUCTURED_PLAN_SCHEMA_VERSION:
+        if schema_version not in SUPPORTED_PLAN_SCHEMA_VERSIONS:
             raise PlanSchemaError(f"Unsupported plan schema: {schema_version}")
+        raw_subgoals = value.get("subgoals", [])
+        if not isinstance(raw_subgoals, list):
+            raise PlanSchemaError("Plan subgoals must be a list.")
+        if any(not isinstance(item, Mapping) for item in raw_subgoals):
+            raise PlanSchemaError("Every plan subgoal must be an object.")
         return cls(
             task_type=str(value["task_type"]).strip(),
             goal=str(value["goal"]).strip(),
@@ -175,7 +261,11 @@ class StructuredPlan:
             budget=PlanBudget.from_mapping(raw_budget),
             reasoning_summary=str(value["reasoning_summary"]).strip(),
             planner_version=str(value["planner_version"]).strip(),
-            schema_version=schema_version,
+            subgoals=tuple(
+                ResearchSubgoal.from_mapping(item)
+                for item in raw_subgoals
+            ),
+            schema_version=STRUCTURED_PLAN_SCHEMA_VERSION,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -183,6 +273,7 @@ class StructuredPlan:
             "schema_version": self.schema_version,
             "task_type": self.task_type,
             "goal": self.goal,
+            "subgoals": [subgoal.to_dict() for subgoal in self.subgoals],
             "skills": [step.to_dict() for step in self.steps],
             "budget": self.budget.to_dict(),
             "reasoning_summary": self.reasoning_summary,

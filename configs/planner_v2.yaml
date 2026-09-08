@@ -7,5 +7,5 @@ planner:
   max_tokens: 800
   max_steps: 6
   fallback_enabled: true
-  prompt_version: "hybrid_planner_v1.0"
-  config_version: "planner_v2.0"
+  prompt_version: "hybrid_planner_v2.0"
+  config_version: "planner_v3.0"

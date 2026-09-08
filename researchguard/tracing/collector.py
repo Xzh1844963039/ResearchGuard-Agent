@@ -38,6 +38,10 @@ class TraceCollector:
             planner_metadata=copy.deepcopy(
                 getattr(state, "planner_metadata", {})
             ),
+            subgoals=tuple(copy.deepcopy(getattr(state, "subgoals", ()))),
+            subgoal_results=copy.deepcopy(
+                getattr(state, "subgoal_results", {})
+            ),
             plan_revisions=tuple(
                 copy.deepcopy(getattr(state, "plan_revisions", ()))
             ),

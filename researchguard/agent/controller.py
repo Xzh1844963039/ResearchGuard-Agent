@@ -171,6 +171,21 @@ class BoundedResearchAgentController:
         state.plan = [step.to_dict() for step in plan.steps]
         state.planner_plan = outcome.structured_plan.copy_dict()
         state.planner_metadata = outcome.metadata()
+        state.subgoals = [
+            subgoal.to_dict() for subgoal in outcome.structured_plan.subgoals
+        ]
+        state.subgoal_results = {
+            subgoal["subgoal_id"]: {
+                **copy.deepcopy(subgoal),
+                "status": "pending",
+                "attempts": 0,
+                "evidence_count": 0,
+                "coverage": None,
+                "evidence_bundle": None,
+                "reason": None,
+            }
+            for subgoal in state.subgoals
+        }
         state.workflow_name = plan.workflow
         state.set_status("planned")
         plan_error = self.policy.validate_plan(state)
@@ -515,7 +530,7 @@ class BoundedResearchAgentController:
                     f"invalid_skill_input: {exc}",
                 )
             context = SkillContext(
-                query=state.query,
+                query=str(skill_input.get("query") or state.query),
                 task_type=state.task_type,
                 state=state,
                 inputs=skill_input,
@@ -526,9 +541,9 @@ class BoundedResearchAgentController:
                 ),
             )
             result = self.skill_executor.execute(skill_name, context)
-            self._record_skill_result(state, skill_input, result)
+            self._record_skill_result(state, skill_input, result, step=step)
             try:
-                self._apply_skill_result(state, result)
+                self._apply_skill_result(state, result, step=step)
             except (TypeError, ValueError) as exc:
                 state.observations[-1]["output_validation_error"] = {
                     "exception_type": type(exc).__name__,
@@ -552,6 +567,7 @@ class BoundedResearchAgentController:
                 skill_name=skill_name,
                 result=result,
                 available_skills=self.skill_registry.names,
+                step=step,
             )
             if revision is not None:
                 if len(revision.new_plan) > self.policy.max_steps:
@@ -626,9 +642,17 @@ class BoundedResearchAgentController:
         step: Mapping[str, Any],
     ) -> dict[str, Any]:
         parameters = copy.deepcopy(dict(step.get("parameters", {}) or {}))
+        subgoal_id = str(step.get("subgoal_id") or "").strip() or None
+        subgoal = state.subgoal_results.get(subgoal_id or "", {})
+        step_query = str(
+            parameters.get("query")
+            or subgoal.get("question")
+            or state.query
+        ).strip()
         if skill_name in {"search_papers", "search_scholarly_sources"}:
             return {
-                "query": state.query,
+                "query": step_query,
+                "subgoal_id": subgoal_id,
                 "limit": parameters.get(
                     "limit",
                     state.workflow_input.get("candidate_limit", 5),
@@ -640,7 +664,8 @@ class BoundedResearchAgentController:
             }
         if skill_name == "retrieve_evidence":
             return {
-                "query": state.query,
+                "query": step_query,
+                "subgoal_id": subgoal_id,
                 "papers": state.workflow_input.get("papers"),
                 "comparison_dimensions": state.workflow_input.get(
                     "comparison_dimensions",
@@ -706,7 +731,10 @@ class BoundedResearchAgentController:
         state: ResearchAgentState,
         skill_input: Mapping[str, Any],
         result: SkillResult,
+        *,
+        step: Mapping[str, Any],
     ) -> None:
+        subgoal_id = str(step.get("subgoal_id") or "").strip() or None
         record = {
             "skill_name": result.skill_name,
             "input_summary": self._input_summary(skill_input),
@@ -716,6 +744,7 @@ class BoundedResearchAgentController:
             "trace_id": result.trace_id,
             "reason": result.reason,
             "evidence_count": len(result.evidence),
+            "subgoal_id": subgoal_id,
         }
         state.skill_history.append(record)
         state.workflow_steps.append(
@@ -732,6 +761,8 @@ class BoundedResearchAgentController:
                 "trace_id": result.trace_id,
                 "output": copy.deepcopy(dict(result.output)),
                 "evidence_count": len(result.evidence),
+                "subgoal_id": subgoal_id,
+                "query": skill_input.get("query"),
             }
         )
         state.touch()
@@ -740,9 +771,21 @@ class BoundedResearchAgentController:
         self,
         state: ResearchAgentState,
         result: SkillResult,
+        *,
+        step: Mapping[str, Any],
     ) -> None:
         output = result.output
         state.skill_outputs[result.skill_name] = copy.deepcopy(dict(output))
+        subgoal_id = str(step.get("subgoal_id") or "").strip() or None
+        if result.skill_name == "retrieve_evidence" and subgoal_id:
+            self._apply_subgoal_retrieval_result(
+                state,
+                result,
+                step=step,
+                subgoal_id=subgoal_id,
+            )
+            state.touch()
+            return
         raw_evidence = output.get("evidence")
         if isinstance(raw_evidence, list):
             state.evidence = self._serialize_evidence(raw_evidence)
@@ -769,6 +812,109 @@ class BoundedResearchAgentController:
         if isinstance(audit, Mapping):
             state.audit_result = copy.deepcopy(dict(audit))
         state.touch()
+
+    def _apply_subgoal_retrieval_result(
+        self,
+        state: ResearchAgentState,
+        result: SkillResult,
+        *,
+        step: Mapping[str, Any],
+        subgoal_id: str,
+    ) -> None:
+        if subgoal_id not in state.subgoal_results:
+            raise ValueError(f"Unknown runtime subgoal: {subgoal_id}")
+        entry = state.subgoal_results[subgoal_id]
+        entry["attempts"] = int(entry.get("attempts", 0)) + 1
+        entry["status"] = "satisfied" if result.status == "success" else "missing"
+        entry["reason"] = result.reason
+        entry["coverage"] = result.output.get("coverage")
+        entry["trace_id"] = result.trace_id
+        entry["query"] = str(
+            dict(step.get("parameters", {}) or {}).get("query")
+            or entry.get("question")
+            or state.query
+        )
+
+        bundle: EvidenceBundle | None = None
+        raw_bundle = result.output.get("evidence_bundle")
+        if result.status == "success" and isinstance(raw_bundle, Mapping):
+            bundle = EvidenceBundle.from_mapping(raw_bundle)
+        elif result.status == "success":
+            raw_evidence = result.output.get("evidence")
+            if isinstance(raw_evidence, list) and raw_evidence:
+                bundle = EvidenceBundle.create(
+                    query=entry["query"],
+                    evidence=raw_evidence,
+                    retrieval_metadata={
+                        "source": "controller_subgoal_legacy_adapter",
+                    },
+                    provenance={
+                        "source": "controller_subgoal_legacy_adapter",
+                        "subgoal_id": subgoal_id,
+                    },
+                )
+        if bundle is not None:
+            if " ".join(bundle.query.casefold().split()) != " ".join(
+                entry["query"].casefold().split()
+            ):
+                raise ValueError(
+                    "Subgoal retrieval returned an EvidenceBundle for another query."
+                )
+            entry["evidence_bundle"] = bundle.to_dict()
+            entry["evidence_count"] = len(bundle.evidence_records)
+            coverage = entry.get("coverage")
+            entry["status"] = (
+                "insufficient"
+                if isinstance(coverage, (int, float)) and float(coverage) < 0.25
+                else "satisfied"
+            )
+        else:
+            entry["evidence_count"] = 0
+
+        bundles: list[tuple[str, EvidenceBundle]] = []
+        for subgoal in state.subgoals:
+            current_id = str(subgoal.get("subgoal_id", ""))
+            current = state.subgoal_results.get(current_id, {})
+            raw = current.get("evidence_bundle")
+            if isinstance(raw, Mapping):
+                bundles.append((current_id, EvidenceBundle.from_mapping(raw)))
+        if not bundles:
+            state.evidence = []
+            state.evidence_bundle = None
+            return
+
+        evidence_by_id: dict[str, EvidenceRecord] = {}
+        for _, source_bundle in bundles:
+            for record in source_bundle.evidence_records:
+                evidence_by_id.setdefault(record.chunk_id, record)
+        aggregate = EvidenceBundle.create(
+            query=state.query,
+            evidence=evidence_by_id.values(),
+            retrieval_metadata={
+                "strategy": "bounded_subgoal_aggregation",
+                "subgoal_count": len(bundles),
+                "source_bundle_ids": [bundle.bundle_id for _, bundle in bundles],
+            },
+            provenance={
+                "source": "controller_subgoal_aggregation",
+                "subgoal_sources": [
+                    {
+                        "subgoal_id": current_id,
+                        "question": state.subgoal_results[current_id].get("question"),
+                        "bundle_id": bundle.bundle_id,
+                        "chunk_ids": list(bundle.chunk_ids),
+                    }
+                    for current_id, bundle in bundles
+                ],
+            },
+        )
+        state.evidence_bundle = aggregate.to_dict()
+        state.evidence = [
+            record.to_dict() for record in aggregate.evidence_records
+        ]
+        state.gate_decision = None
+        state.answer = None
+        state.audit_result = None
 
     def _finish_skill_execution(
         self,
