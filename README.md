@@ -259,6 +259,8 @@ Generated data、indexes、models、cache、memory snapshots 与 outputs 均由 
 
 ## Quick Start
 
+准备秋招项目复习时，可使用 [ResearchGuard-Agent 秋招面试教练提示词](docs/ResearchGuard秋招面试教练提示词.md)，将其与 README 和建议的核心源码上传到网页版 GPT，按诊断、课程、代码深挖和模拟面试逐步学习。
+
 ### 1. Clone
 
 ```powershell
