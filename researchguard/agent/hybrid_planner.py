@@ -170,7 +170,10 @@ class OpenAIPlannerBackend:
         instructions = (
             "You propose a bounded research plan; you do not execute tools and do not answer the query. "
             "Decompose only goals with multiple independent evidence needs into two to four subgoals. "
-            "For a simple task return an empty subgoals array. Each subgoal must have a stable id, "
+            "Never return exactly one subgoal; for a simple task return an empty subgoals array. "
+            "For QA and literature-review plans, every declared subgoal must have exactly one "
+            "retrieve_evidence step, and generate_report must be the final step. Do not use scholarly "
+            "metadata search merely to answer a local-corpus QA. Each subgoal must have a stable id, "
             "an answerable research question, an objective, and an observable success criterion. "
             "A subgoal retrieval step must use that id and repeat the exact subgoal question in "
             "parameters.query; unrelated steps use null. Do not add redundant subgoals or skills. "
@@ -607,6 +610,9 @@ class HybridPlanner:
     ) -> Mapping[str, Any]:
         payload = copy.deepcopy(dict(value))
         payload.setdefault("subgoals", [])
+        raw_subgoals = payload.get("subgoals")
+        if isinstance(raw_subgoals, list) and len(raw_subgoals) == 1:
+            payload["subgoals"] = []
         raw_steps = payload.get("skills")
         if not isinstance(raw_steps, list):
             return payload
@@ -616,6 +622,7 @@ class HybridPlanner:
             for item in payload.get("subgoals", [])
             if isinstance(item, Mapping)
         }
+        declared_subgoal_ids = set(subgoal_questions)
         protected_report_present = any(
             isinstance(item, Mapping)
             and str(item.get("skill", "")) == "generate_report"
@@ -640,6 +647,11 @@ class HybridPlanner:
                 if subgoal_id in subgoal_questions:
                     parameters = dict(step.get("parameters", {}) or {})
                     parameters["query"] = subgoal_questions[subgoal_id]
+                    step["parameters"] = parameters
+                elif subgoal_id and subgoal_id not in declared_subgoal_ids:
+                    step["subgoal_id"] = None
+                    parameters = dict(step.get("parameters", {}) or {})
+                    parameters.pop("query", None)
                     step["parameters"] = parameters
             else:
                 step["subgoal_id"] = None

@@ -1,10 +1,46 @@
 # ResearchGuard-Agent Capability Audit
 
-## 审计结论
+## Final Review 结论（2026-09-08）
 
-ResearchGuard-Agent 已经是一个**受确定性安全边界约束的单 Agent 系统**，不是只有 Agent 命名的普通 RAG，也不是开放式自主研究 Agent。它真实具备 Planner、Plan Validator、Controller、Skill/Tool Registry、State、Observation、bounded replanning、Memory、Trace 以及 Evidence Gate/Citation Audit；但当前自主性主要停留在固定 task type 下的 Skill 路由和失败恢复，尚不能稳定地把开放科研目标拆成多个可验证子目标，再针对缺失子目标调整后续计划。
+ResearchGuard-Agent 当前可以准确定位为 **Evidence-Grounded Adaptive Research Agent**：它能把部分 QA / literature-review 开放目标拆成 2-4 个有独立 query、objective 和 success criterion 的 subgoal；每个 subgoal 独立检索 canonical evidence，并通过局部 Evidence Gate 判断目标是否真实完成。局部 partial/unsupported observation 会替换对应 subgoal 的检索 query；当全部局部目标 strong 但最终整题 Gate 仍发现缺口时，Replanner 可插入一个有界 runtime gap subgoal。所有回答仍必须通过最终 aggregate Gate、Guarded Answer 和 Citation Audit。
 
-因此，当前最值得做的升级不是增加 Skill 或引入新框架，而是为现有 Structured Plan 增加**有界子目标契约、step-local query、子目标级 canonical evidence 聚合，以及只修补缺失子目标的 observation-driven replanning**。
+这比上一轮的 targeted retry 更接近 plan adaptation，但仍是**线性、有界、确定性约束内的 adaptation**，不是任意计划图、无限 ReAct 或 fully autonomous researcher。默认预算为 6 steps、14 Tool calls、2 revisions，Controller 在每次 Tool invoke 前执行硬检查。
+
+### 本轮代码级发现与修复
+
+- 旧状态把 retrieval success / evidence count 当作 subgoal satisfied，`success_criterion` 只存储、不参与决策。
+- Aggregate Gate 能拒绝整题，但无法稳定指出哪个 subgoal 缺证，因而会触发 whole-query expanded retrieval。
+- Hybrid Planner 对简单问题偶尔生成单 subgoal，Validator 正确拒绝，但造成不必要 fallback。
+- Skill 内部连续 Tool 调用原来只在 Skill 开始前检查预算，理论上可能晚一个调用发现越界。
+
+修复后，subgoal assessment bundle 使用原 canonical EvidenceRecord，并把 question、objective、success criterion 作为判断问题；GateDecision 与 assessment bundle ID 绑定。`partial` 不得被 aggregate answer 隐藏。Replanner 记录 `revise_query` 或 `add` subgoal change，Trace v4 则显式输出 completed/missing objectives、Gate status、observation、plan change 与最终 bundle/status。
+
+### 候选方向取舍
+
+- **已做：Subgoal-aware Evidence Sufficiency。** 这是 targeted replanning 的直接瓶颈，且可在 Agent 层复用现有 Evidence Tool，无需重写 Evidence Engine。
+- **已做：Bounded Structural Replanning。** 支持局部 query replacement 和最多一个 aggregate-gap subgoal insertion；没有开放任意 remove/reorder/DAG。
+- **已做：Planner A/B v2。** 5 条 live paired goal 均执行完整 Agent 链路；Hybrid fallback 0、decomposition quality 0.80 对 0.40，但 completion 都是 0.80，因此结论是 `HYBRID_STRUCTURAL_GAIN_ONLY`。
+- **未做：On-demand Corpus Expansion。** 当前缺少开放许可校验、下载安全、临时 Parser/Chunk/Index 事务、session index isolation 与 rollback；metadata 继续保持 `evidence_eligible=false`。
+- **未做：Long-running checkpoint/resume。** 当前最多 6 steps、2 revisions、120 秒控制目标，不值得引入第二套持久化执行系统。
+- **未做：新 task family / Multi-Agent / LangGraph。** 真实瓶颈是 observation 语义与 Planner 稳定性，不是执行框架数量。
+
+### 最终验证
+
+- Full unittest：145/145 PASS。
+- Pipeline：PASS；Evidence Gate bypass 0。
+- Retrieval：PASS；Hybrid Recall@10 0.9444。
+- Agent Benchmark v3：50/50 PASS；provenance 1.0；gate bypass 0；successful completion 0.46。
+- Holdout v1：22/25 PASS；answer/refusal correctness 0.96；provenance 1.0；gate bypass 0。
+- Capability v2：14/14 PASS；partial hidden、metadata leak、gate/audit bypass、budget nondeterminism hard checks 0。
+- Planner A/B v2：5/5 Hybrid non-fallback，结构质量提升但无 completion lift；平均 Tool calls 4.0 → 5.4，观测 latency 12.05s → 23.53s。
+
+因此建议将当前版本冻结为 bounded adaptive Agent baseline。进一步扩展应优先增加独立开放目标样本和无缓存成本评测；corpus expansion 必须作为单独安全阶段，不应混入本轮。
+
+---
+
+## Historical Audit Baseline（Goal Decomposition 实现前）
+
+以下内容保留上一轮审计时的代码缺口，作为本次升级的前置基线；其中“尚不能分解 subgoal”等描述不代表当前状态。
 
 ## 已经做得很好的部分
 

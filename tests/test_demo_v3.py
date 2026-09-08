@@ -9,6 +9,8 @@ from demo.utils import (
     agent_plan_rows,
     evidence_bundle_view,
     memory_trace_view,
+    objective_status_rows,
+    plan_revision_rows,
     skill_timeline_rows,
     tool_call_rows,
 )
@@ -49,6 +51,32 @@ class DemoV3ViewTests(unittest.TestCase):
             "memory_status": {"persisted": True},
             "memory_context": {"matched_run_ids": ["r1"]},
             "memory_snapshot": {"run": {"run_id": "r2"}},
+            "subgoals": [
+                {
+                    "subgoal_id": "sg-1",
+                    "objective": "Find method evidence.",
+                }
+            ],
+            "subgoal_results": {
+                "sg-1": {
+                    "status": "insufficient",
+                    "attempts": 1,
+                    "completion_criterion_met": False,
+                    "gate_decision": {"status": "partial"},
+                    "reason": "Experimental evidence is missing.",
+                }
+            },
+            "plan_revisions": [
+                {
+                    "reason": "refine_subgoal_query_after_evidence_gap",
+                    "observation": {
+                        "subgoal_id": "sg-1",
+                        "support_level": "partial",
+                    },
+                    "subgoal_changes": [{"operation": "revise_query"}],
+                    "new_skill_sequence": ["retrieve_evidence", "generate_report"],
+                }
+            ],
         }
 
     def test_agent_trace_views_are_separate(self) -> None:
@@ -66,6 +94,15 @@ class DemoV3ViewTests(unittest.TestCase):
         self.assertTrue(trace["status"]["persisted"])
         self.assertEqual(["r1"], trace["context"]["matched_run_ids"])
         self.assertEqual("r2", trace["snapshot"]["run"]["run_id"])
+
+    def test_objective_and_revision_views_explain_adaptation(self) -> None:
+        objective = objective_status_rows(self.state)[0]
+        revision = plan_revision_rows(self.state)[0]
+
+        self.assertEqual(objective["gate"], "partial")
+        self.assertFalse(objective["criterion_met"])
+        self.assertEqual(revision["trigger_subgoal"], "sg-1")
+        self.assertEqual(revision["plan_change"], "revise_query")
 
 
 if __name__ == "__main__":

@@ -26,6 +26,8 @@ from demo.utils import (
     evidence_view,
     final_status_view,
     memory_trace_view,
+    objective_status_rows,
+    plan_revision_rows,
     retrieval_hits,
     safe_error_message,
     sanitize_for_display,
@@ -383,6 +385,32 @@ def render_workflow_result(state: dict[str, Any]) -> None:
         )
     else:
         st.info(f"Bounded workflow selected: {workflow_name}")
+
+    objectives = objective_status_rows(state)
+    if objectives:
+        st.markdown("### Research Objectives")
+        st.dataframe(
+            objectives,
+            column_order=(
+                "subgoal",
+                "status",
+                "gate",
+                "attempts",
+                "criterion_met",
+                "objective",
+                "reason",
+            ),
+            hide_index=True,
+            use_container_width=True,
+        )
+    revisions = plan_revision_rows(state)
+    if revisions:
+        st.markdown("### Why The Plan Changed")
+        st.dataframe(
+            revisions,
+            hide_index=True,
+            use_container_width=True,
+        )
 
     st.markdown("## Execution Trace")
     st.markdown("### Skill Timeline")

@@ -12,7 +12,7 @@ MAX_PLAN_REVISIONS = 2
 @dataclass(frozen=True)
 class AgentPolicy:
     max_steps: int = 6
-    max_tool_calls: int = 10
+    max_tool_calls: int = 14
     max_retry: int = 2
     max_plan_revisions: int = 2
     timeout: float = 120.0

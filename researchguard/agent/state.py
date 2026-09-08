@@ -10,9 +10,10 @@ from pathlib import Path
 from typing import Any, Mapping
 
 
-AGENT_STATE_SCHEMA_VERSION = "researchguard.agent_state.v2"
+AGENT_STATE_SCHEMA_VERSION = "researchguard.agent_state.v3"
 SUPPORTED_AGENT_STATE_SCHEMAS = {
     "researchguard.agent_state.v1",
+    "researchguard.agent_state.v2",
     AGENT_STATE_SCHEMA_VERSION,
 }
 

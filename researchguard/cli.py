@@ -329,7 +329,7 @@ def main() -> None:
     agent_parser.add_argument("--output", help="Optional agent report JSON path.")
     agent_parser.add_argument("--state-output", help="Optional resumable agent state JSON path.")
     agent_parser.add_argument("--max-steps", type=int, default=6)
-    agent_parser.add_argument("--max-tool-calls", type=int, default=10)
+    agent_parser.add_argument("--max-tool-calls", type=int, default=14)
     agent_parser.add_argument("--max-retry", type=int, default=2)
     agent_parser.add_argument("--max-plan-revisions", type=int, default=2)
     agent_parser.add_argument("--timeout", type=float, default=120.0)

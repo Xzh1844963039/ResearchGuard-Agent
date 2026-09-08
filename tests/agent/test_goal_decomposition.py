@@ -1,4 +1,5 @@
 # C:\Users\18449\Desktop\researchguard_workspace\tests\agent\test_goal_decomposition.py
+# C:\Users\18449\Desktop\researchguard_workspace\tests\agent\test_goal_decomposition.py
 from __future__ import annotations
 
 import json
@@ -216,18 +217,22 @@ def open_goal_plan() -> StructuredPlan:
 def registry_for(
     *,
     experiment_failures: int,
+    assessment_modes: list[str] | None = None,
 ) -> tuple[ToolRegistry, list[dict[str, Any]], Counter[str]]:
     registry = ToolRegistry()
     retrieval_calls: list[dict[str, Any]] = []
     calls: Counter[str] = Counter()
+    assessment_count = 0
 
     def retrieve(**kwargs: Any) -> ToolResult:
         calls["retrieve_evidence"] += 1
         retrieval_calls.append(dict(kwargs))
         query = str(kwargs["query"])
-        is_experiment = query == EXPERIMENT_QUERY
+        is_experiment = query.startswith(EXPERIMENT_QUERY)
         experiment_attempt = sum(
-            1 for item in retrieval_calls if item.get("query") == EXPERIMENT_QUERY
+            1
+            for item in retrieval_calls
+            if str(item.get("query", "")).startswith(EXPERIMENT_QUERY)
         )
         if is_experiment and experiment_attempt <= experiment_failures:
             return tool_result(
@@ -251,14 +256,19 @@ def registry_for(
         )
 
     def assess(**kwargs: Any) -> ToolResult:
+        nonlocal assessment_count
         calls["assess_evidence"] += 1
         bundle = EvidenceBundle.from_mapping(kwargs["evidence_bundle"])
+        modes = assessment_modes or ["strong"]
+        mode = modes[min(assessment_count, len(modes) - 1)]
+        assessment_count += 1
+        supporting = list(bundle.chunk_ids) if mode in {"strong", "partial"} else []
         assessment = {
-            "support_level": "strong",
-            "answerable": True,
+            "support_level": mode,
+            "answerable": mode == "strong",
             "confidence": 0.95,
-            "reason": "Both bounded subgoals have canonical evidence.",
-            "supporting_chunk_ids": list(bundle.chunk_ids),
+            "reason": f"synthetic_{mode}_evidence_observation",
+            "supporting_chunk_ids": supporting,
         }
         gate = GateDecision.from_assessment(
             evidence_bundle_id=bundle.bundle_id,
@@ -266,6 +276,8 @@ def registry_for(
         )
         return tool_result(
             "assess_evidence",
+            status="success" if mode == "strong" else "rejected",
+            reason=None if mode == "strong" else "insufficient_evidence",
             data={"assessment": assessment, "gate_decision": gate.to_dict()},
         )
 
@@ -492,6 +504,48 @@ class GoalDecompositionTests(unittest.TestCase):
         self.assertFalse(result.valid)
         self.assertIn("single_subgoal_is_unnecessary", result.errors)
 
+    def test_hybrid_planner_collapses_single_subgoal_to_simple_plan(self) -> None:
+        registry, _, _ = registry_for(experiment_failures=0)
+        skills = build_default_skill_registry(registry)
+        policy = AgentPolicy()
+        plan = open_goal_plan()
+        payload = plan.to_dict()
+        payload["subgoals"] = payload["subgoals"][:1]
+        payload["skills"] = [payload["skills"][0], payload["skills"][-1]]
+        planner = HybridPlanner(
+            registry=registry,
+            skills=skills,
+            policy=policy,
+            deterministic=DeterministicPlanner(
+                registry=registry,
+                skills=skills,
+                policy=policy,
+            ),
+            settings=HybridPlannerSettings(
+                enabled=True,
+                backend="openai",
+                model="synthetic-planner",
+                temperature=0,
+                timeout=5,
+                max_tokens=500,
+                max_steps=6,
+                fallback_enabled=True,
+                prompt_version="open-goal-test-v1",
+                config_version="open-goal-test-v1",
+            ),
+            backend=StaticPlannerBackend(payload),
+        )
+
+        outcome = planner.generate_plan(plan.goal)
+
+        self.assertFalse(outcome.fallback_used)
+        self.assertEqual(outcome.structured_plan.subgoals, ())
+        self.assertEqual(
+            [step.subgoal_id for step in outcome.structured_plan.steps],
+            [None, None],
+        )
+        self.assertNotIn("query", outcome.structured_plan.steps[0].parameters)
+
     def test_validator_rejects_repeated_retrieval_for_same_subgoal(self) -> None:
         registry, _, _ = registry_for(experiment_failures=0)
         plan = open_goal_plan()
@@ -568,6 +622,115 @@ class GoalDecompositionTests(unittest.TestCase):
             trace["subgoal_results"]["sg-experiments"]["status"],
             "satisfied",
         )
+
+    def test_subgoal_gate_uses_completion_criterion_and_refines_only_that_query(self) -> None:
+        registry, retrieval_calls, calls = registry_for(
+            experiment_failures=0,
+            assessment_modes=["strong", "partial", "strong", "strong"],
+        )
+        state = BoundedResearchAgentController(
+            registry=registry,
+            planner=OpenGoalPlanner(open_goal_plan(), registry),
+            memory_enabled=False,
+        ).run(open_goal_plan().goal)
+
+        self.assertEqual(state.status, "completed")
+        self.assertEqual(len(retrieval_calls), 3)
+        self.assertEqual(retrieval_calls[0]["query"], METHOD_QUERY)
+        self.assertEqual(retrieval_calls[1]["query"], EXPERIMENT_QUERY)
+        self.assertTrue(retrieval_calls[2]["query"].startswith(EXPERIMENT_QUERY))
+        self.assertIn("Required completion evidence", state.subgoal_results["sg-experiments"]["assessment_query"])
+        self.assertTrue(
+            state.subgoal_results["sg-experiments"]["completion_criterion_met"]
+        )
+        self.assertEqual(
+            state.plan_revisions[0]["reason"],
+            "refine_subgoal_query_after_evidence_gap",
+        )
+        change = state.plan_revisions[0]["subgoal_changes"][0]
+        self.assertEqual(change["operation"], "revise_query")
+        self.assertEqual(change["subgoal_id"], "sg-experiments")
+        self.assertNotEqual(change["previous_query"], change["new_query"])
+        self.assertEqual(calls["assess_evidence"], 4)
+        self.assertEqual(calls["generate_grounded_answer"], 1)
+
+    def test_partial_subgoal_cannot_be_hidden_by_aggregate_answer(self) -> None:
+        registry, _, calls = registry_for(
+            experiment_failures=0,
+            assessment_modes=["strong", "partial", "partial"],
+        )
+        state = BoundedResearchAgentController(
+            registry=registry,
+            planner=OpenGoalPlanner(open_goal_plan(), registry),
+            memory_enabled=False,
+        ).run(open_goal_plan().goal)
+
+        self.assertEqual(state.status, "rejected")
+        self.assertEqual(state.reason, "insufficient_evidence")
+        self.assertEqual(
+            state.subgoal_results["sg-experiments"]["status"],
+            "insufficient",
+        )
+        self.assertEqual(state.gate_decision["status"], "partial")
+        self.assertIn("sg-experiments", state.gate_decision["reason"])
+        self.assertEqual(calls["generate_grounded_answer"], 0)
+        self.assertEqual(calls["audit_answer"], 0)
+        self.assertIsNone(state.answer)
+
+    def test_aggregate_gate_gap_inserts_bounded_runtime_subgoal(self) -> None:
+        registry, retrieval_calls, calls = registry_for(
+            experiment_failures=0,
+            assessment_modes=["strong", "strong", "partial", "strong", "strong"],
+        )
+        state = BoundedResearchAgentController(
+            registry=registry,
+            planner=OpenGoalPlanner(open_goal_plan(), registry),
+            memory_enabled=False,
+        ).run(open_goal_plan().goal)
+
+        self.assertEqual(state.status, "completed")
+        self.assertEqual(len(state.subgoals), 3)
+        gap_id = state.subgoals[-1]["subgoal_id"]
+        self.assertTrue(gap_id.startswith("sg-gap-"))
+        self.assertEqual(state.subgoal_results[gap_id]["origin"], "replanner")
+        self.assertEqual(state.subgoal_results[gap_id]["status"], "satisfied")
+        self.assertIn("unresolved evidence requirement", retrieval_calls[-1]["query"])
+        self.assertEqual(
+            state.plan_revisions[0]["reason"],
+            "insert_subgoal_for_aggregate_gate_gap",
+        )
+        self.assertEqual(
+            state.plan_revisions[0]["subgoal_changes"][0]["operation"],
+            "add",
+        )
+        self.assertEqual(calls["generate_grounded_answer"], 1)
+        self.assertEqual(calls["audit_answer"], 1)
+
+    def test_internal_skill_calls_cannot_exceed_tool_budget(self) -> None:
+        registry, _, calls = registry_for(experiment_failures=0)
+        source = open_goal_plan()
+        bounded_plan = StructuredPlan(
+            task_type=source.task_type,
+            goal=source.goal,
+            subgoals=source.subgoals,
+            steps=source.steps,
+            budget=PlanBudget(6, 5, 2, 2),
+            reasoning_summary=source.reasoning_summary,
+            planner_version=source.planner_version,
+        )
+        state = BoundedResearchAgentController(
+            registry=registry,
+            planner=OpenGoalPlanner(bounded_plan, registry),
+            policy=AgentPolicy(max_tool_calls=5),
+            memory_enabled=False,
+        ).run(bounded_plan.goal)
+
+        self.assertEqual(state.status, "failed")
+        self.assertEqual(state.reason, "max_tool_calls_exceeded")
+        self.assertEqual(len(state.tool_history), 5)
+        self.assertEqual(calls["generate_grounded_answer"], 0)
+        self.assertEqual(calls["audit_answer"], 0)
+        self.assertIsNone(state.answer)
 
     def test_metadata_fallback_cannot_enter_canonical_evidence(self) -> None:
         registry, retrieval_calls, calls = registry_for(experiment_failures=99)

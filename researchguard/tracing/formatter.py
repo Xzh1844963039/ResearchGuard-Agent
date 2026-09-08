@@ -32,6 +32,26 @@ def format_trace_markdown(trace: AgentTrace) -> str:
             f"| {event.get('stage', '')} | {event.get('status', '')} | "
             f"{summary} | {latency if latency is not None else ''} |"
         )
+    if trace.objective_status:
+        rows.extend(
+            [
+                "",
+                "## Research Objectives",
+                "",
+                "| Subgoal | Status | Gate | Attempts | Criterion |",
+                "|---|---|---|---:|---|",
+            ]
+        )
+        for objective in trace.objective_status:
+            criterion = str(objective.get("success_criterion", "")).replace(
+                "|", "\\|"
+            )
+            rows.append(
+                f"| {objective.get('subgoal_id', '')} | "
+                f"{objective.get('status', '')} | "
+                f"{objective.get('gate_status') or ''} | "
+                f"{objective.get('attempts', 0)} | {criterion} |"
+            )
     return "\n".join(rows) + "\n"
 
 

@@ -23,6 +23,10 @@ from researchguard.agent.planner_validator import PlanValidationResult
 from researchguard.agent.policy import AgentPolicy
 from researchguard.agent.replanner import BoundedReplanner
 from researchguard.agent.state import ResearchAgentState, utc_timestamp
+from researchguard.agent.subgoal_evidence import (
+    build_incomplete_aggregate_gate,
+    build_subgoal_assessment_bundle,
+)
 from researchguard.memory import DEFAULT_MEMORY_ROOT, ResearchMemory
 from researchguard.skills import (
     SkillContext,
@@ -182,6 +186,11 @@ class BoundedResearchAgentController:
                 "evidence_count": 0,
                 "coverage": None,
                 "evidence_bundle": None,
+                "source_bundle_id": None,
+                "assessment_bundle_id": None,
+                "gate_decision": None,
+                "gate_trace_id": None,
+                "completion_criterion_met": False,
                 "reason": None,
             }
             for subgoal in state.subgoals
@@ -450,8 +459,7 @@ class BoundedResearchAgentController:
                         "failed",
                         "recovery_plan_exceeds_step_budget",
                     )
-                state.plan_revisions.append(revision.to_dict())
-                state.plan = copy.deepcopy(list(revision.new_plan))
+                self._apply_plan_revision(state, revision)
                 state.current_step += 1
                 state.retry_counts.clear()
                 state.touch()
@@ -582,8 +590,7 @@ class BoundedResearchAgentController:
                         "failed",
                         "recovery_plan_exceeds_step_budget",
                     )
-                state.plan_revisions.append(revision.to_dict())
-                state.plan = copy.deepcopy(list(revision.new_plan))
+                self._apply_plan_revision(state, revision)
                 state.current_step += 1
                 state.retry_counts.clear()
                 state.touch()
@@ -705,6 +712,8 @@ class BoundedResearchAgentController:
         tool_name: str,
         tool_input: Mapping[str, Any],
     ) -> ToolResult:
+        if len(state.tool_history) >= self.policy.max_tool_calls:
+            return self._tool_call_budget_failure(tool_name)
         try:
             result = self.registry.invoke(tool_name, **dict(tool_input))
         except Exception as exc:
@@ -825,7 +834,7 @@ class BoundedResearchAgentController:
             raise ValueError(f"Unknown runtime subgoal: {subgoal_id}")
         entry = state.subgoal_results[subgoal_id]
         entry["attempts"] = int(entry.get("attempts", 0)) + 1
-        entry["status"] = "satisfied" if result.status == "success" else "missing"
+        entry["status"] = "retrieved" if result.status == "success" else "missing"
         entry["reason"] = result.reason
         entry["coverage"] = result.output.get("coverage")
         entry["trace_id"] = result.trace_id
@@ -861,15 +870,25 @@ class BoundedResearchAgentController:
                     "Subgoal retrieval returned an EvidenceBundle for another query."
                 )
             entry["evidence_bundle"] = bundle.to_dict()
+            entry["source_bundle_id"] = bundle.bundle_id
             entry["evidence_count"] = len(bundle.evidence_records)
             coverage = entry.get("coverage")
-            entry["status"] = (
-                "insufficient"
-                if isinstance(coverage, (int, float)) and float(coverage) < 0.25
-                else "satisfied"
-            )
+            if isinstance(coverage, (int, float)) and float(coverage) < 0.25:
+                entry["status"] = "insufficient"
+                entry["reason"] = "subgoal_retrieval_coverage_low"
+            else:
+                self._assess_subgoal_evidence(
+                    state,
+                    subgoal_id=subgoal_id,
+                    source_bundle=bundle,
+                )
         else:
             entry["evidence_count"] = 0
+            entry["source_bundle_id"] = None
+            entry["assessment_bundle_id"] = None
+            entry["gate_decision"] = None
+            entry["gate_trace_id"] = None
+            entry["completion_criterion_met"] = False
 
         bundles: list[tuple[str, EvidenceBundle]] = []
         for subgoal in state.subgoals:
@@ -912,9 +931,178 @@ class BoundedResearchAgentController:
         state.evidence = [
             record.to_dict() for record in aggregate.evidence_records
         ]
-        state.gate_decision = None
+        incomplete_gate = build_incomplete_aggregate_gate(
+            aggregate,
+            state.subgoal_results,
+        )
+        state.gate_decision = (
+            incomplete_gate.to_dict() if incomplete_gate is not None else None
+        )
         state.answer = None
         state.audit_result = None
+
+    def _assess_subgoal_evidence(
+        self,
+        state: ResearchAgentState,
+        *,
+        subgoal_id: str,
+        source_bundle: EvidenceBundle,
+    ) -> None:
+        entry = state.subgoal_results[subgoal_id]
+        assessment_bundle = build_subgoal_assessment_bundle(
+            source_bundle,
+            subgoal_id=subgoal_id,
+            question=str(entry.get("question", "")),
+            objective=str(entry.get("objective", "")),
+            success_criterion=str(entry.get("success_criterion", "")),
+        )
+        tool_input = {"evidence_bundle": assessment_bundle.to_dict()}
+        budget_exhausted = len(state.tool_history) >= self.policy.max_tool_calls
+        if budget_exhausted:
+            result = self._tool_call_budget_failure("assess_evidence")
+        else:
+            try:
+                result = self.registry.invoke("assess_evidence", **tool_input)
+            except Exception as exc:
+                result = ToolResult.create(
+                    status="failed",
+                    message="Subgoal evidence assessment raised an unhandled exception.",
+                    reason="subgoal_assessment_exception",
+                    tool_name="assess_evidence",
+                    tool_version=self.registry.version,
+                    latency_ms=0.0,
+                    error=ToolError(
+                        code="subgoal_assessment_exception",
+                        category="execution_failure",
+                        message=str(exc),
+                        retryable=False,
+                        details={"exception_type": type(exc).__name__},
+                    ),
+                )
+        if not budget_exhausted:
+            self._record_tool_result(
+                state,
+                "assess_evidence",
+                tool_input,
+                result,
+                decision_context={
+                    "scope": "subgoal",
+                    "subgoal_id": subgoal_id,
+                    "source_bundle_id": source_bundle.bundle_id,
+                    "success_criterion": entry.get("success_criterion"),
+                },
+            )
+        self._record_subgoal_gate(
+            state,
+            subgoal_id=subgoal_id,
+            assessment_bundle=assessment_bundle,
+            result=result,
+        )
+
+    def _tool_call_budget_failure(self, tool_name: str) -> ToolResult:
+        return ToolResult.create(
+            status="failed",
+            message="Tool call budget was exhausted before invocation.",
+            reason="max_tool_calls_exceeded",
+            tool_name=tool_name,
+            tool_version=self.registry.version,
+            latency_ms=0.0,
+            error=ToolError(
+                code="max_tool_calls_exceeded",
+                category="execution_failure",
+                message="The bounded Agent Tool call limit has been reached.",
+                retryable=False,
+            ),
+        )
+
+    def _record_subgoal_gate(
+        self,
+        state: ResearchAgentState,
+        *,
+        subgoal_id: str,
+        assessment_bundle: EvidenceBundle,
+        result: ToolResult,
+    ) -> None:
+        entry = state.subgoal_results[subgoal_id]
+        gate: GateDecision | None = None
+        raw_gate = result.data.get("gate_decision")
+        if isinstance(raw_gate, Mapping):
+            gate = GateDecision.from_mapping(raw_gate)
+        else:
+            assessment = result.data.get("assessment")
+            if isinstance(assessment, Mapping):
+                gate = GateDecision.from_assessment(
+                    evidence_bundle_id=assessment_bundle.bundle_id,
+                    assessment=assessment,
+                )
+        if gate is None or gate.evidence_bundle_id != assessment_bundle.bundle_id:
+            gate = GateDecision(
+                status="unsupported",
+                reason="Subgoal evidence assessment did not return a valid bound decision.",
+                supporting_chunk_ids=(),
+                evidence_bundle_id=assessment_bundle.bundle_id,
+                confidence=0.0,
+                answerable=False,
+                assessment={
+                    "source": "controller_fail_closed_subgoal_gate",
+                    "tool_status": result.status,
+                    "tool_reason": result.reason,
+                },
+            )
+        entry["assessment_bundle_id"] = assessment_bundle.bundle_id
+        entry["assessment_query"] = assessment_bundle.query
+        entry["gate_decision"] = gate.to_dict()
+        entry["gate_trace_id"] = result.trace_id
+        entry["completion_criterion_met"] = (
+            result.status == "success"
+            and gate.status == "strong"
+            and gate.answerable
+        )
+        if result.status == "failed":
+            entry["status"] = "assessment_failed"
+            entry["reason"] = result.reason or "subgoal_assessment_failed"
+        elif entry["completion_criterion_met"]:
+            entry["status"] = "satisfied"
+            entry["reason"] = None
+        elif gate.status == "partial":
+            entry["status"] = "insufficient"
+            entry["reason"] = gate.reason
+        else:
+            entry["status"] = "missing"
+            entry["reason"] = gate.reason
+
+    def _apply_plan_revision(
+        self,
+        state: ResearchAgentState,
+        revision: Any,
+    ) -> None:
+        for change in getattr(revision, "subgoal_changes", ()):
+            operation = str(change.get("operation", ""))
+            subgoal = change.get("subgoal")
+            if operation != "add" or not isinstance(subgoal, Mapping):
+                continue
+            serialized = copy.deepcopy(dict(subgoal))
+            subgoal_id = str(serialized.get("subgoal_id", "")).strip()
+            if not subgoal_id or subgoal_id in state.subgoal_results:
+                continue
+            state.subgoals.append(serialized)
+            state.subgoal_results[subgoal_id] = {
+                **copy.deepcopy(serialized),
+                "status": "pending",
+                "attempts": 0,
+                "evidence_count": 0,
+                "coverage": None,
+                "evidence_bundle": None,
+                "source_bundle_id": None,
+                "assessment_bundle_id": None,
+                "gate_decision": None,
+                "gate_trace_id": None,
+                "completion_criterion_met": False,
+                "reason": None,
+                "origin": "replanner",
+            }
+        state.plan_revisions.append(revision.to_dict())
+        state.plan = copy.deepcopy(list(revision.new_plan))
 
     def _finish_skill_execution(
         self,
@@ -1076,8 +1264,11 @@ class BoundedResearchAgentController:
         tool_name: str,
         tool_input: Mapping[str, Any],
         result: ToolResult,
+        *,
+        decision_context: Mapping[str, Any] | None = None,
     ) -> None:
         input_summary = self._input_summary(tool_input)
+        context = copy.deepcopy(dict(decision_context or {}))
         bundle_payload = result.data.get("evidence_bundle")
         output_bundle_id = (
             bundle_payload.get("bundle_id")
@@ -1098,6 +1289,7 @@ class BoundedResearchAgentController:
                     or output_bundle_id
                     or input_summary.get("evidence_bundle_id")
                 ),
+                "decision_context": context,
             }
         )
         state.observations.append(
@@ -1109,6 +1301,7 @@ class BoundedResearchAgentController:
                 "trace_id": result.trace_id,
                 "data": copy.deepcopy(dict(result.data)),
                 "error": result.error.to_dict() if result.error else None,
+                "decision_context": context,
             }
         )
         state.touch()

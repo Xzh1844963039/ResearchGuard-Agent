@@ -7,11 +7,12 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from researchguard.agent.state import ResearchAgentState, utc_timestamp
+from researchguard.agent.subgoal_evidence import refined_subgoal_query
 from researchguard.skills import SkillResult
 from researchguard.tools import ToolResult
 
 
-PLAN_REVISION_SCHEMA_VERSION = "researchguard.plan_revision.v1"
+PLAN_REVISION_SCHEMA_VERSION = "researchguard.plan_revision.v2"
 
 
 @dataclass(frozen=True)
@@ -20,6 +21,7 @@ class PlanRevision:
     observation: Mapping[str, Any]
     new_plan: tuple[Mapping[str, Any], ...]
     reason: str
+    subgoal_changes: tuple[Mapping[str, Any], ...] = ()
     revision_id: str = ""
     created_at: str = ""
     version: str = "1.0.0"
@@ -53,11 +55,14 @@ class PlanRevision:
                 for step in self.new_plan
                 if step.get("skill")
             ],
+            "subgoal_changes": copy.deepcopy(list(self.subgoal_changes)),
             "reason": self.reason,
         }
 
 
 class BoundedReplanner:
+    max_runtime_subgoals = 4
+
     def __init__(
         self,
         *,
@@ -138,7 +143,12 @@ class BoundedReplanner:
     ) -> PlanRevision | None:
         if len(state.plan_revisions) >= self.max_revisions:
             return None
-        observation = self._skill_observation(skill_name, result, step=step)
+        observation = self._skill_observation(
+            state,
+            skill_name,
+            result,
+            step=step,
+        )
         subgoal_id = str(observation.get("subgoal_id") or "").strip() or None
         reasons = {
             str(item.get("reason", "")) for item in state.plan_revisions
@@ -180,12 +190,49 @@ class BoundedReplanner:
                         observation,
                         reason="scholarly_discovery_after_retrieval_miss",
                     )
+            support_level = str(
+                observation.get("support_level", "")
+            ).casefold()
+            if (
+                subgoal_id
+                and result.status == "success"
+                and support_level in {"partial", "unsupported"}
+                and not self._has_subgoal_gate_revision(
+                    state,
+                    subgoal_id=subgoal_id,
+                )
+            ):
+                return self._refined_subgoal_skill_retrieval(
+                    state,
+                    observation,
+                    reason="refine_subgoal_query_after_evidence_gap",
+                )
             return None
 
         if skill_name in {"generate_report", "assess_evidence"}:
             support_level = str(
                 observation.get("support_level", "")
             ).casefold()
+            if state.subgoal_results:
+                if (
+                    result.status == "rejected"
+                    and support_level == "partial"
+                    and all(
+                        item.get("status") == "satisfied"
+                        for item in state.subgoal_results.values()
+                    )
+                    and len(state.subgoals) < self.max_runtime_subgoals
+                    and not any(
+                        item.get("reason") == "insert_subgoal_for_aggregate_gate_gap"
+                        for item in state.plan_revisions
+                    )
+                ):
+                    return self._insert_aggregate_gap_subgoal(
+                        state,
+                        observation,
+                        reason="insert_subgoal_for_aggregate_gate_gap",
+                    )
+                return None
             if (
                 result.status == "rejected"
                 and support_level == "partial"
@@ -197,6 +244,116 @@ class BoundedReplanner:
                     reason="expanded_retrieval_after_partial_evidence",
                 )
         return None
+
+    def _refined_subgoal_skill_retrieval(
+        self,
+        state: ResearchAgentState,
+        observation: Mapping[str, Any],
+        *,
+        reason: str,
+    ) -> PlanRevision:
+        subgoal_id = str(observation.get("subgoal_id") or "").strip()
+        subgoal = state.subgoal_results[subgoal_id]
+        current = copy.deepcopy(state.plan[state.current_step])
+        parameters = copy.deepcopy(dict(current.get("parameters", {}) or {}))
+        new_query = refined_subgoal_query(subgoal)
+        parameters.update(
+            {
+                "query": new_query,
+                "rewrite": True,
+                "multi_query": True,
+                "top_k": self.expanded_top_k,
+                "candidate_k": self.expanded_candidate_k,
+                "read_cache": False,
+            }
+        )
+        current.update(
+            {
+                "purpose": "Resolve the observed subgoal evidence gap with a refined query.",
+                "parameters": parameters,
+                "recovery_terminal": False,
+                "max_retry": 1,
+            }
+        )
+        return self._revision(
+            state,
+            observation,
+            [current],
+            reason,
+            preserve_remaining=True,
+            subgoal_changes=[
+                {
+                    "operation": "revise_query",
+                    "subgoal_id": subgoal_id,
+                    "previous_query": observation.get("subgoal_query"),
+                    "new_query": new_query,
+                    "success_criterion": subgoal.get("success_criterion"),
+                }
+            ],
+        )
+
+    def _insert_aggregate_gap_subgoal(
+        self,
+        state: ResearchAgentState,
+        observation: Mapping[str, Any],
+        *,
+        reason: str,
+    ) -> PlanRevision:
+        suffix = len(state.plan_revisions) + 1
+        subgoal_id = f"sg-gap-{suffix}"
+        gap_reason = " ".join(
+            str(observation.get("gate_reason") or "aggregate evidence remained partial")
+            .split()
+        )
+        if len(gap_reason) > 480:
+            gap_reason = gap_reason[:480].rsplit(" ", 1)[0]
+        question = (
+            f"{state.query} Focus only on the unresolved evidence requirement: "
+            f"{gap_reason}"
+        )
+        subgoal = {
+            "subgoal_id": subgoal_id,
+            "question": question,
+            "objective": "Resolve the evidence gap found by the final aggregate Gate.",
+            "success_criterion": (
+                "Canonical evidence directly resolves this Gate observation: "
+                f"{gap_reason}"
+            ),
+        }
+        recovery_steps = [
+            {
+                "skill": "retrieve_evidence",
+                "tool": "",
+                "purpose": "Collect canonical evidence for the aggregate Gate gap.",
+                "parameters": {
+                    "query": question,
+                    "rewrite": True,
+                    "multi_query": True,
+                    "top_k": self.expanded_top_k,
+                    "candidate_k": self.expanded_candidate_k,
+                    "read_cache": False,
+                },
+                "subgoal_id": subgoal_id,
+                "recovery_terminal": False,
+                "max_retry": 1,
+            },
+            {
+                "skill": "generate_report",
+                "tool": "",
+                "purpose": "Re-run the protected aggregate Gate and finish if supported.",
+                "parameters": {},
+                "subgoal_id": None,
+                "recovery_terminal": False,
+                "max_retry": 0,
+            },
+        ]
+        return self._revision(
+            state,
+            observation,
+            recovery_steps,
+            reason,
+            subgoal_changes=[{"operation": "add", "subgoal": subgoal}],
+        )
 
     def _expanded_subgoal_skill_retrieval(
         self,
@@ -404,6 +561,7 @@ class BoundedReplanner:
         reason: str,
         *,
         preserve_remaining: bool = False,
+        subgoal_changes: list[dict[str, Any]] | None = None,
     ) -> PlanRevision:
         previous = copy.deepcopy(state.plan)
         completed = copy.deepcopy(state.plan[: state.current_step + 1])
@@ -420,6 +578,7 @@ class BoundedReplanner:
             observation=copy.deepcopy(dict(observation)),
             new_plan=tuple(combined),
             reason=reason,
+            subgoal_changes=tuple(copy.deepcopy(subgoal_changes or [])),
         )
 
     @staticmethod
@@ -458,6 +617,7 @@ class BoundedReplanner:
 
     @staticmethod
     def _skill_observation(
+        state: ResearchAgentState,
         skill_name: str,
         result: SkillResult,
         *,
@@ -467,6 +627,19 @@ class BoundedReplanner:
         subgoal_id = str(step_value.get("subgoal_id") or "").strip() or None
         parameters = dict(step_value.get("parameters", {}) or {})
         coverage = result.output.get("coverage")
+        subgoal = state.subgoal_results.get(subgoal_id or "", {})
+        subgoal_gate = subgoal.get("gate_decision")
+        gate_status = (
+            str(subgoal_gate.get("status", ""))
+            if isinstance(subgoal_gate, Mapping)
+            else ""
+        )
+        result_gate = result.output.get("gate_decision")
+        gate_reason = (
+            str(result_gate.get("reason", ""))
+            if isinstance(result_gate, Mapping)
+            else ""
+        )
         return {
             "skill_name": skill_name,
             "status": result.status,
@@ -478,14 +651,42 @@ class BoundedReplanner:
             "coverage_low": (
                 isinstance(coverage, (int, float)) and float(coverage) < 0.25
             ),
-            "support_level": result.output.get("support_level"),
+            "support_level": gate_status or result.output.get("support_level"),
+            "gate_reason": (
+                str(subgoal_gate.get("reason", ""))
+                if isinstance(subgoal_gate, Mapping)
+                else gate_reason
+            ),
             "error_type": result.output.get("error_type"),
             "error_code": result.output.get("error_code"),
             "retryable": bool(result.output.get("retryable", False)),
             "trace_id": result.trace_id,
             "subgoal_id": subgoal_id,
-            "subgoal_question": parameters.get("query"),
+            "subgoal_question": subgoal.get("question"),
+            "subgoal_query": parameters.get("query"),
+            "subgoal_status": subgoal.get("status"),
+            "success_criterion": subgoal.get("success_criterion"),
+            "completion_criterion_met": subgoal.get(
+                "completion_criterion_met"
+            ),
+            "missing_subgoal_ids": [
+                key
+                for key, value in state.subgoal_results.items()
+                if value.get("status") != "satisfied"
+            ],
         }
+
+    @staticmethod
+    def _has_subgoal_gate_revision(
+        state: ResearchAgentState,
+        *,
+        subgoal_id: str,
+    ) -> bool:
+        return any(
+            item.get("reason") == "refine_subgoal_query_after_evidence_gap"
+            and item.get("observation", {}).get("subgoal_id") == subgoal_id
+            for item in state.plan_revisions
+        )
 
     @staticmethod
     def _has_scholarly_fallback(

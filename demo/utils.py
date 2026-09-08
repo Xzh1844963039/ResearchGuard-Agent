@@ -235,6 +235,67 @@ def agent_plan_rows(state: Mapping[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+def objective_status_rows(state: Mapping[str, Any]) -> list[dict[str, Any]]:
+    trace = state.get("agent_trace")
+    trace_rows = (
+        trace.get("objective_status", ())
+        if isinstance(trace, Mapping)
+        else ()
+    )
+    if trace_rows:
+        source = trace_rows
+    else:
+        results = state.get("subgoal_results") or {}
+        source = [
+            {**item, **dict(results.get(item.get("subgoal_id"), {}) or {})}
+            for item in state.get("subgoals") or ()
+            if isinstance(item, Mapping)
+        ]
+    return [
+        {
+            "subgoal": item.get("subgoal_id"),
+            "status": item.get("status", "pending"),
+            "gate": item.get("gate_status")
+            or (
+                item.get("gate_decision", {}).get("status")
+                if isinstance(item.get("gate_decision"), Mapping)
+                else None
+            ),
+            "attempts": int(item.get("attempts") or 0),
+            "criterion_met": bool(item.get("completion_criterion_met", False)),
+            "objective": item.get("objective"),
+            "reason": item.get("reason"),
+        }
+        for item in source
+        if isinstance(item, Mapping)
+    ]
+
+
+def plan_revision_rows(state: Mapping[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "revision": index,
+            "reason": item.get("reason"),
+            "trigger_subgoal": item.get("observation", {}).get("subgoal_id")
+            if isinstance(item.get("observation"), Mapping)
+            else None,
+            "observed_gate": item.get("observation", {}).get("support_level")
+            if isinstance(item.get("observation"), Mapping)
+            else None,
+            "plan_change": ", ".join(
+                str(change.get("operation", ""))
+                for change in item.get("subgoal_changes", ())
+                if isinstance(change, Mapping)
+            ),
+            "new_skills": " -> ".join(
+                str(name) for name in item.get("new_skill_sequence", ())
+            ),
+        }
+        for index, item in enumerate(state.get("plan_revisions") or (), start=1)
+        if isinstance(item, Mapping)
+    ]
+
+
 def skill_timeline_rows(state: Mapping[str, Any]) -> list[dict[str, Any]]:
     return [
         {

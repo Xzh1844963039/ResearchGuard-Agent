@@ -28,6 +28,23 @@ class AgentTraceTests(unittest.TestCase):
                 "fallback_used": False,
                 "api_call_count": 1,
             },
+            subgoals=[
+                {
+                    "subgoal_id": "sg-1",
+                    "question": "How does CRAG work?",
+                    "objective": "Find mechanism evidence.",
+                    "success_criterion": "Direct method evidence is present.",
+                }
+            ],
+            subgoal_results={
+                "sg-1": {
+                    "status": "satisfied",
+                    "attempts": 1,
+                    "evidence_count": 1,
+                    "completion_criterion_met": True,
+                    "gate_decision": {"status": "strong"},
+                }
+            },
             workflow_name="paper_comparison",
             workflow_steps=[
                 {
@@ -83,6 +100,9 @@ class AgentTraceTests(unittest.TestCase):
         self.assertEqual(payload["memory"]["snapshot"]["evidence_ledger"][0]["claim_id"], "claim-1")
         self.assertEqual(payload["memory_context"]["matched_run_ids"], ["agent-old"])
         self.assertEqual(payload["timeline"][-1]["stage"], "final")
+        self.assertEqual(payload["schema_version"], "researchguard.agent_trace.v4")
+        self.assertEqual(payload["completed_objectives"][0]["subgoal_id"], "sg-1")
+        self.assertEqual(payload["decision_summary"]["completed_objective_ids"], ["sg-1"])
 
     def test_cli_formatters_do_not_drop_provenance(self) -> None:
         state = ResearchAgentState(

@@ -44,15 +44,15 @@ flowchart TD
 
 | Capability | Current implementation | Boundary |
 |---|---|---|
-| Bounded agent | 单 Controller，限制 steps、tool calls、retry、revision 与 timeout | 没有无限 ReAct 或开放式自治循环 |
+| Bounded agent | 单 Controller，限制 steps、tool calls、retry、revision 与 timeout；每次 Tool invoke 前检查预算 | 默认最多 6 steps、14 tool calls、2 revisions |
 | Adaptive planning | Hybrid LLM Planner + strict schema + deterministic fallback | LLM 只能提议计划，不能执行 Tool 或扩大 Policy |
 | Goal decomposition | 最多 4 个带独立 query 与成功条件的 research subgoals | 只支持 QA / literature review 的线性有界计划 |
 | Dynamic skill composition | Validator 校验后的线性 Skill sequence | 不支持任意 DAG、动态代码或并行 Agent |
 | Tool execution | Registry 统一暴露 Retrieval、Evidence、Answer、Audit、Scholarly Search | Tool Facade 不重写 Evidence Engine |
-| Failure recovery | 根据 subgoal observation 只补检缺失目标；旧任务保持 bounded fallback | `max_plan_revisions <= 2` |
+| Failure recovery | 局部 Gate 驱动 query replacement；aggregate Gate 缺口可插入一个 runtime subgoal | `max_plan_revisions <= 2`，不支持任意计划改写 |
 | Evidence grounding | Canonical `chunk_id/page/section`、EvidenceBundle、GateDecision | 外部论文 metadata 不能直接成为证据 |
 | Safe generation | Evidence Gate → Answer Generation → Citation Audit | partial/unsupported 不允许生成 |
-| Traceability | plan、skills、tools、evidence、gate、answer、audit、memory 全链路 Trace | Trace 不等同于模型隐藏推理 |
+| Traceability | Trace v4 记录 completed/missing objectives、Gate observation、subgoal change 与最终决策 | 结构化决策解释，不记录模型隐藏推理 |
 
 ### Hybrid Planner
 
@@ -70,9 +70,9 @@ Planner API / JSON / schema / policy failure
 
 Structured Plan v2 包含 `task_type`、`goal`、可选 `subgoals`、`skills`、`budget`、`reasoning_summary` 和 `planner_version`。每个 subgoal 保存稳定 ID、独立 research question、objective 与 success criterion；检索 step 必须绑定对应 `subgoal_id` 和完全一致的 step-local query。Validator 允许不同 subgoal 合理复用 `retrieve_evidence`，同时拒绝同一 subgoal 的重复检索、未知参数、预算越界、Evidence Gate bypass、未审计生成和非法顺序。
 
-`expected_observation` 由 Skill Registry 的实际输出契约确定，不再依赖 LLM 猜测类型字符串；step-local query 则从对应 subgoal question 确定性派生，避免两个重复字段漂移。历史 Planner A/B 中 Hybrid 路径仍是 50/50 fallback，因此该历史结果不能表述为 LLM Planner 质量提升；本轮只证明合法开放目标计划可以通过 schema/validator 并执行，live Planner 质量仍需新的非 fallback A/B 评测。
+`expected_observation` 由 Skill Registry 的实际输出契约确定，不再依赖 LLM 猜测类型字符串；step-local query 则从对应 subgoal question 确定性派生，避免两个重复字段漂移。Hybrid Planner 明确禁止只生成一个 subgoal；若模型仍返回单 subgoal，契约归一化会把它收敛为简单计划，再交给同一 Validator。LLM 仍不能自行放宽预算、注册 Skill 或绕过 protected generation。
 
-本轮另执行了一条 live open-goal smoke：Hybrid Planner 使用 1 次 API 调用生成 2 个 subgoal，`fallback_used=false`，Controller 分别执行两个 step-local retrieval，最终 answer 和 Citation Audit 均完成。这是可运行性证据，不替代成规模 Planner A/B。
+历史 Planner A/B v1 的 50 个 Hybrid case 全部 fallback，该结果仍保留。新的 Planner A/B v2 使用 5 条无 chunk-id 标注的真实开放目标运行完整 Agent 链路；Hybrid 5/5 均为 `hybrid_llm`、fallback 0，但结论仅为 `HYBRID_STRUCTURAL_GAIN_ONLY`，详见 Evaluation。它证明当前 Planner 能稳定产出合法计划，不证明完成率优于 deterministic baseline。
 
 ### Dynamic Skills
 
@@ -109,13 +109,17 @@ Research Goal
 → 2-4 bounded subgoals when independent evidence needs exist
 → each subgoal uses its own validated retrieval query
 → Controller stores one canonical EvidenceBundle per subgoal
+→ subgoal Gate evaluates question + objective + success criterion
+→ only strong Gate marks the subgoal satisfied
+→ partial/unsupported observation replaces only that subgoal query
 → aggregate by chunk_id while preserving source bundle provenance
-→ missing subgoal receives one targeted expanded retrieval
+→ final aggregate Gate checks that decomposition did not omit the original goal
+→ an unresolved aggregate gap may insert one bounded runtime subgoal
 → repeated miss becomes metadata-only discovery and fail-closed refusal
-→ aggregated evidence still passes Evidence Gate and Citation Audit
+→ strong aggregate evidence proceeds to Generation and Citation Audit
 ```
 
-已满足 subgoal 不会因另一个 subgoal 缺证而重跑，原计划中未受影响的未来步骤会被保留。`ResearchAgentState` 与 Agent Trace v3 记录 subgoals、每个目标的 attempts/status/coverage/source bundle 和 plan patch。
+每个局部门控使用同一组 canonical `EvidenceRecord` 创建独立 assessment bundle，GateDecision 与该 bundle ID 绑定；它不会把 metadata 或新文本变成 evidence。最终 aggregate Gate 仍保留，用于防止 Planner 漏拆原目标。已满足 subgoal 不会因另一个 subgoal 缺证而重跑，原计划中未受影响的未来步骤会被保留。`ResearchAgentState` v3 与 Agent Trace v4 记录 attempts、criterion result、source/assessment bundle、completed/missing objectives、observation、subgoal change 和当前计划。
 
 ## Evidence Engine
 
@@ -199,7 +203,7 @@ Multi-query 保持 Recall/MRR，但 nDCG 略低于 Raw Hybrid + Reranker，因�
 
 ### Agent Benchmark v3
 
-2026-07-27 完整真实运行结果：
+2026-09-08 完整真实回归结果：
 
 | Metric | Result |
 |---|---:|
@@ -213,6 +217,7 @@ Multi-query 保持 Recall/MRR，但 nDCG 略低于 Raw Hybrid + Reranker，因�
 | Plan validity | 1.0000 |
 | Provenance validity | 1.0000 |
 | Gate bypass attempts | **0** |
+| Successful completion | 0.4600 |
 
 该 benchmark 评估 routing、Skill execution、safety boundary 与 provenance，不代表“100% Agent accuracy”，也不等同于开放域科研质量。优化前基线为 0.60，Paper Comparison 为 0.2667、Claim Audit 为 0.4667，并出现 6 次 gate bypass hard-check；这些失败推动了 paper identity separation、atomic claim verification 和统一 generation boundary 修复。
 
@@ -236,11 +241,25 @@ Holdout 使用独立 10 篇论文、637 chunks 和 25 条 blind questions：
 
 ### Planner A/B
 
-结论为 `INCONCLUSIVE_FALLBACK_ONLY`。Deterministic 与 Hybrid 在 50 条标注上的 routing、sequence、completeness 和 validity 相同，但 Hybrid 50/50 全部 fallback，产生 50 次 API 调用、71,589 input tokens 与 13,380 output tokens，没有可证明的质量增益。这一结果被保留为真实限制。
+Planner A/B v1 结论为 `INCONCLUSIVE_FALLBACK_ONLY`：Hybrid 50/50 全部 fallback，没有可证明增益。Structured Plan v2 后新增 A/B v2，以 3 条 compound goal 和 2 条 simple goal 运行真实 `Planner → Controller → Skill → Evidence Engine`：
 
-### Agent Capability Validation v1
+| Metric | Deterministic | Hybrid |
+|---|---:|---:|
+| Completion rate | 0.8000 | 0.8000 |
+| Decomposition quality | 0.4000 | **0.8000** |
+| Simple task precision | 1.0000 | 1.0000 |
+| Plan validity | 1.0000 | 1.0000 |
+| Hybrid fallback rate | N/A | **0.0000** |
+| Average tool calls | 4.0000 | 5.4000 |
+| Average skill calls | 2.4000 | 2.8000 |
+| Average observed latency | 12.05 s | 23.53 s |
+| Planner API calls / tokens | 0 / 0 | 5 / 10,357 |
 
-开放目标专项验证通过 `9/9`：
+结论为 `HYBRID_STRUCTURAL_GAIN_ONLY`：Hybrid 提高了目标结构表达并保持简单问题不拆解，但没有提高这 5 条 case 的完成率，且增加了 Tool、API 和 latency 成本。所有 provenance、metadata isolation、Gate bypass 和 plan validity hard checks 为 0。执行成本受本地共享缓存与固定的 deterministic-first 顺序影响，因此不是严格的无缓存成本实验。
+
+### Agent Capability Validation v2
+
+开放目标专项验证通过 `14/14`：
 
 | Check | Result |
 |---|---:|
@@ -251,13 +270,18 @@ Holdout 使用独立 10 篇论文、637 chunks 和 25 条 blind questions：
 | Unnecessary single-subgoal decomposition guard | PASS |
 | Subgoal-aware duplicate/cycle guard | PASS |
 | Observation-driven targeted replan | PASS |
+| Subgoal question + success criterion Gate | PASS |
+| Partial subgoal cannot be hidden by aggregate answer | PASS |
+| Observation-driven query replacement | PASS |
+| Aggregate Gate gap subgoal insertion | PASS |
+| Internal Skill Tool-call budget enforcement | PASS |
 | Metadata-to-evidence isolation | PASS |
 | Deterministic bounded recovery | PASS |
 | Provenance / metadata leak / gate-audit bypass / loop hard checks | **0** |
 
-专项 case 将目标拆成“机制证据”和“实验依据”两个 subgoal，并让实验检索首次失败。Trace 显示执行从原来的整条 fixed recovery 变为只补检 `sg-experiments`，`sg-mechanism` 只执行一次，成功后两个 source bundles 被聚合并继续经过 Gate、Generation 和 Audit。若补检仍失败，系统只返回 scholarly metadata candidate 并拒答，不会把 abstract 作为 evidence。
+专项 case 将目标拆成“机制证据”和“实验依据”两个 subgoal。即使 retrieval 返回 evidence，只有局部 Gate 对 question、objective 和 success criterion 判定 strong 才完成；partial 会生成带 Gate reason 的有界 query replacement，只补检对应 subgoal。若补检仍不足，系统拒绝生成；若所有局部目标 strong 但最终整题 Gate 仍 partial，Replanner 最多插入一个 gap subgoal 后重新门控。
 
-额外 live smoke 使用开放问题“解释 CRAG 如何纠正弱检索，并给出支持该机制的实验依据”：Planner 生成 2 个 subgoal，mode=`hybrid_llm`、fallback=`false`，执行完成并保留 20 条 canonical evidence、answer 与 audit。聚合 Gate 首次返回 partial 后触发了一次现有的整题 expanded retrieval；因此系统已能针对单个 retrieval miss 做局部修补，但尚不能从 aggregate Gate 判断中自动定位“哪个 subgoal 的语义证据仍不足”。
+同一 CRAG 开放问题的代码级前后 Trace 对比：升级前两个 subgoal 仅因各返回 10 条 evidence 被标记 satisfied，aggregate Gate partial 后执行整题 expanded retrieval，最终 rejected；升级后一次 live run 中 mechanism Gate strong、experiment Gate partial，系统只替换 experiment query，第二次局部 Gate strong 后通过最终 Gate、Generation 和 Audit并 completed。A/B v2 的重复运行仍出现该 CRAG case 在两次 revision 后 rejected，说明真实 LLM Gate 判断仍有波动，bounded adaptation 提升了决策定位但没有保证完成。
 
 ## Project Structure
 
@@ -380,7 +404,7 @@ python -m researchguard.cli run "What is the difference between RAG-Sequence and
 python -m streamlit run demo/app.py
 ```
 
-打开 `http://127.0.0.1:8501`。Demo 展示 Generated Plan、Skill/Tool execution trace、canonical evidence、Evidence Gate、Grounded Answer、Citation Audit、Evidence Ledger 与 run memory。页面不会显示 API key、环境变量或本地绝对路径。
+打开 `http://127.0.0.1:8501`。Demo 展示 Generated Plan、每个 research objective 的 Gate/status/attempts、Why The Plan Changed、Skill/Tool execution trace、canonical evidence、最终 Evidence Gate、Grounded Answer、Citation Audit、Evidence Ledger 与 run memory。页面不会显示 API key、环境变量或本地绝对路径。
 
 ### 7. Run the API
 
@@ -432,11 +456,13 @@ OpenAPI 文档位于 `http://127.0.0.1:8000/docs`。
 python -m compileall researchguard api scripts
 python -m unittest discover -s tests -v
 python scripts/validate_agent_capability_v1.py
+python scripts/validate_agent_capability_v2.py
 python scripts/validate_pipeline_v1.py
 python scripts/validate_agent_benchmark_v3.py
 python scripts/validate_holdout_v1.py
 python scripts/validate_retrieval_v1.py
 python scripts/compare_planners_v1.py
+python scripts/compare_planners_v2.py
 python scripts/validate_api_v1.py
 ```
 
@@ -460,8 +486,9 @@ python scripts/validate_api_v1.py
 - Corpus 规模有限；Retrieval benchmark、Agent Benchmark v3 与 holdout 不能代表开放域泛化。
 - Benchmark v3 验证 routing、execution、safety 与 provenance，不验证所有科研结论的专家级正确性。
 - Holdout v1 仍有 2 条 Planner routing mismatch 与 1 条 external API failure。
-- 历史 Planner A/B 全部 fallback；Structured Plan v2 已通过 synthetic validation 和 1 条 live non-fallback smoke，但尚无新的成规模 live A/B 证明 LLM Planner 优于 deterministic Planner。
-- Subgoal retrieval miss 可局部修补；aggregate Gate 的 partial observation 目前不能定位具体缺失 subgoal，仍会使用现有整题 expanded retrieval。
+- Planner A/B v2 的 5 条 live case 已实现 fallback 0、decomposition quality 0.80，但完成率与 deterministic 同为 0.80，平均 Tool calls 从 4.0 增至 5.4；尚不能宣称 Hybrid Planner 全面优于规则 Planner。
+- Subgoal-aware Gate 和 bounded structural replanning 已实现，但只支持线性 query replacement 和最多一个 aggregate-gap subgoal；不支持任意 insert/remove/reorder、依赖图或跨任务长期计划。
+- 局部 Gate 为每个 subgoal 增加 Evidence Judge 成本；为容纳最多 4 个 subgoal、最终 Gate 和一次恢复，默认 Tool-call 上限由 10 调整为 14，实际运行仍在每次 invoke 前 fail closed 检查。
 - On-demand corpus expansion 尚未实现；scholarly discovery 仍只返回 metadata，候选论文需要受控 ingestion 后才能成为 canonical evidence。
 - Goal decomposition 当前是线性计划，只开放给 QA / literature review，最多 4 个 subgoal；不支持依赖图、并行执行或无限长任务。
 - Research Memory 只提供 advisory context，不做长期用户画像或跨项目知识学习。
@@ -479,15 +506,16 @@ python scripts/validate_api_v1.py
 | Evidence Gate + Grounded Generation + Citation Audit | Completed |
 | Tool Facade + Evidence Contracts | Completed |
 | Bounded Controller + Hybrid Planner + Dynamic Skills | Completed |
-| Bounded Goal Decomposition + Targeted Replanning | Completed; capability validation `PASS 9/9`; live smoke non-fallback |
-| Research Memory + Evidence Ledger + Trace | Completed |
+| Subgoal-aware Gate + Bounded Structural Replanning | Completed; capability validation v2 `PASS 14/14` |
+| Research Memory + Evidence Ledger + Trace v4 | Completed |
 | Agent Benchmark v3 | `PASS`, 50/50, hard checks 0 |
 | Independent Holdout v1 | `PASS`, 22/25 |
-| Planner A/B | `INCONCLUSIVE_FALLBACK_ONLY` |
+| Planner A/B v1 | `INCONCLUSIVE_FALLBACK_ONLY` historical result |
+| Planner A/B v2 | `HYBRID_STRUCTURAL_GAIN_ONLY`; 5/5 non-fallback, no completion lift |
 | FastAPI + Streamlit Demo v3 | Completed for local use |
 | Production deployment / auth / monitoring | Not implemented |
 
-下一步不增加新的 Agent 框架：优先使用新的开放目标 case 重跑 live Planner A/B，观察有效 decomposition rate、fallback rate、无效步骤率和成本；之后再单独设计具备下载许可校验、Parser/Index 事务与回滚的 corpus expansion，未完成该设计前继续保持 metadata-only 边界。
+当前版本建议冻结为 bounded adaptive Agent 基线，不再增加 Agent 框架。后续若继续研究，优先扩充独立开放目标集并做 cache-controlled Planner 成本评测；on-demand corpus expansion 必须先单独设计下载许可校验、文件类型/大小验证、临时 Parser/Chunk/Index 事务、session corpus 隔离和失败回滚，完成前继续保持 metadata-only 边界。
 
 ## Development Documentation Rule
 

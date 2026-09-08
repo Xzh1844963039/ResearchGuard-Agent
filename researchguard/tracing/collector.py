@@ -27,6 +27,19 @@ class TraceCollector:
                     "workflow": state.workflow_name,
                 }
             ]
+        objective_status = self._objective_status(state)
+        completed_objectives = tuple(
+            item for item in objective_status if item["status"] == "satisfied"
+        )
+        missing_objectives = tuple(
+            item for item in objective_status if item["status"] != "satisfied"
+        )
+        evidence_bundle = copy.deepcopy(
+            getattr(state, "evidence_bundle", None)
+        )
+        gate_decision = copy.deepcopy(
+            getattr(state, "gate_decision", None)
+        )
         return AgentTrace(
             run_id=state.run_id,
             query=state.query,
@@ -42,6 +55,9 @@ class TraceCollector:
             subgoal_results=copy.deepcopy(
                 getattr(state, "subgoal_results", {})
             ),
+            objective_status=objective_status,
+            completed_objectives=completed_objectives,
+            missing_objectives=missing_objectives,
             plan_revisions=tuple(
                 copy.deepcopy(getattr(state, "plan_revisions", ()))
             ),
@@ -53,6 +69,8 @@ class TraceCollector:
             tool_calls=tuple(copy.deepcopy(state.tool_history)),
             observations=tuple(copy.deepcopy(state.observations)),
             evidence=tuple(copy.deepcopy(state.evidence)),
+            evidence_bundle=evidence_bundle,
+            gate_decision=gate_decision,
             answer=copy.deepcopy(state.answer),
             audit=copy.deepcopy(state.audit_result),
             memory=memory,
@@ -62,7 +80,61 @@ class TraceCollector:
             created_at=state.created_at,
             completed_at=state.updated_at,
             timeline=tuple(self._timeline(state)),
+            decision_summary={
+                "original_goal": state.query,
+                "current_plan_skills": [
+                    step.get("skill") or step.get("tool") for step in plan
+                ],
+                "completed_objective_ids": [
+                    item["subgoal_id"] for item in completed_objectives
+                ],
+                "missing_objective_ids": [
+                    item["subgoal_id"] for item in missing_objectives
+                ],
+                "evidence_bundle_id": (
+                    evidence_bundle.get("bundle_id")
+                    if isinstance(evidence_bundle, Mapping)
+                    else None
+                ),
+                "gate_status": (
+                    gate_decision.get("status")
+                    if isinstance(gate_decision, Mapping)
+                    else None
+                ),
+                "final_status": state.status,
+                "final_reason": state.reason,
+            },
         )
+
+    @staticmethod
+    def _objective_status(state: Any) -> tuple[dict[str, Any], ...]:
+        rows: list[dict[str, Any]] = []
+        results = getattr(state, "subgoal_results", {})
+        for subgoal in getattr(state, "subgoals", ()):
+            subgoal_id = str(subgoal.get("subgoal_id", ""))
+            result = results.get(subgoal_id, {})
+            gate = result.get("gate_decision")
+            rows.append(
+                {
+                    "subgoal_id": subgoal_id,
+                    "question": subgoal.get("question"),
+                    "objective": subgoal.get("objective"),
+                    "success_criterion": subgoal.get("success_criterion"),
+                    "status": result.get("status", "pending"),
+                    "attempts": result.get("attempts", 0),
+                    "evidence_count": result.get("evidence_count", 0),
+                    "completion_criterion_met": bool(
+                        result.get("completion_criterion_met", False)
+                    ),
+                    "gate_status": (
+                        gate.get("status") if isinstance(gate, Mapping) else None
+                    ),
+                    "reason": result.get("reason"),
+                    "source_bundle_id": result.get("source_bundle_id"),
+                    "assessment_bundle_id": result.get("assessment_bundle_id"),
+                }
+            )
+        return tuple(rows)
 
     @staticmethod
     def _timeline(state: Any) -> list[dict[str, Any]]:
@@ -93,6 +165,17 @@ class TraceCollector:
                     "summary": str(call.get("skill_name", "unknown")),
                     "trace_id": call.get("trace_id"),
                     "latency_ms": call.get("latency_ms"),
+                }
+            )
+        for objective in TraceCollector._objective_status(state):
+            timeline.append(
+                {
+                    "stage": "objective",
+                    "status": str(objective.get("status", "pending")),
+                    "timestamp": state.updated_at,
+                    "summary": str(objective.get("subgoal_id", "unknown")),
+                    "gate_status": objective.get("gate_status"),
+                    "reason": objective.get("reason"),
                 }
             )
         for call in state.tool_history:

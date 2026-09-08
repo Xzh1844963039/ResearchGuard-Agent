@@ -126,7 +126,7 @@ def main() -> None:
     conclusion = (
         "PASS"
         if result.wasSuccessful()
-        and len(passed_names) == len(CAPABILITY_BY_TEST)
+        and CAPABILITY_BY_TEST.keys() <= passed_names
         and not any(hard_checks.values())
         else "FAIL"
     )

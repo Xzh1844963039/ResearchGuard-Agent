@@ -12,7 +12,7 @@ class AgentPolicyTests(unittest.TestCase):
         policy = AgentPolicy()
 
         self.assertEqual(policy.max_steps, 6)
-        self.assertEqual(policy.max_tool_calls, 10)
+        self.assertEqual(policy.max_tool_calls, 14)
         self.assertEqual(policy.max_retry, 2)
         self.assertEqual(policy.max_plan_revisions, 2)
         self.assertGreater(policy.timeout, 0)
